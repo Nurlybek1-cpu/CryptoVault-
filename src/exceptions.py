@@ -228,3 +228,34 @@ class RateLimitError(AuthenticationError):
         self.retry_after = retry_after
         self.limit = limit
 
+
+class PasswordResetError(AuthenticationError):
+    """
+    Exception raised during password reset operations.
+    
+    Raised when password reset operations fail, such as invalid or expired
+    reset tokens, or when reset token verification fails.
+    
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        token_id: Optional reset token identifier related to the error
+    """
+    
+    def __init__(
+        self,
+        message: str,
+        error_code: str | None = None,
+        token_id: str | None = None
+    ) -> None:
+        """
+        Initialize PasswordResetError.
+        
+        Args:
+            message: Error message describing the password reset failure
+            error_code: Optional error code for error categorization
+            token_id: Optional reset token identifier related to the error
+        """
+        super().__init__(message, error_code)
+        self.token_id = token_id
+
