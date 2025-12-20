@@ -430,32 +430,21 @@ class AuthModule:
                 user_id, db_username, password_hash, account_locked, account_locked_until, \
                     failed_attempts, totp_enabled, totp_secret, backup_codes_hash = user_record
                 
-                # Check if account is locked
+                # Check lockout expiry and account lock status
                 current_time = datetime.utcnow()
-                if account_locked:
-                    # Check if lockout period has expired
-                    if account_locked_until and account_locked_until > current_time:
-                        # Account still locked
-                        lockout_until_str = account_locked_until.strftime("%Y-%m-%d %H:%M:%S UTC")
-                        self.logger.warning(f"Login blocked: account locked for {username} until {lockout_until_str}")
-                        raise AccountLockedError(
-                            f"Account locked until: {lockout_until_str}",
-                            error_code="ACCOUNT_LOCKED",
-                            lockout_until=account_locked_until.timestamp(),
-                            reason="Too many failed login attempts"
-                        )
-                    else:
-                        # Lockout expired, unlock account
-                        self.logger.info(f"Lockout expired for {username}, unlocking account")
-                        self.db.execute(
-                            "UPDATE users SET account_locked = ?, account_locked_until = ?, "
-                            "failed_login_attempts = ? WHERE username = ?",
-                            (False, None, 0, username)
-                        )
-                        if hasattr(self.db, 'commit'):
-                            self.db.commit()
-                        account_locked = False
-                        failed_attempts = 0
+                self.check_lock_expiry(user_id)
+                is_locked, lock_reason = self.is_account_locked(user_id)
+                
+                if is_locked:
+                    # Account is locked - raise AccountLockedError
+                    lockout_until_str = account_locked_until.strftime("%Y-%m-%d %H:%M:%S UTC") if account_locked_until else "unknown"
+                    self.logger.warning(f"Login blocked: account locked for {username} until {lockout_until_str}")
+                    raise AccountLockedError(
+                        lock_reason or f"Account locked until: {lockout_until_str}",
+                        error_code="ACCOUNT_LOCKED",
+                        lockout_until=account_locked_until.timestamp() if account_locked_until else None,
+                        reason="Too many failed login attempts"
+                    )
                 
             except (AccountLockedError, AuthenticationError):
                 # Re-raise these exceptions
@@ -502,51 +491,14 @@ class AuthModule:
             
             if not password_valid:
                 # Password verification failed
-                # Increment failed login attempts
-                new_failed_attempts = failed_attempts + 1
-                
-                # Check if we should lock the account (5 failed attempts)
-                should_lock = new_failed_attempts >= 5
-                lockout_until = None
-                
-                if should_lock:
-                    lockout_until = current_time + timedelta(minutes=30)
-                    self.logger.warning(
-                        f"Account locked after {new_failed_attempts} failed attempts for {username} "
-                        f"(locked until {lockout_until})"
-                    )
-                
-                # Update database with failed attempts and lockout status
-                try:
-                    self.db.execute(
-                        "UPDATE users SET failed_login_attempts = ?, account_locked = ?, "
-                        "account_locked_until = ? WHERE username = ?",
-                        (new_failed_attempts, should_lock, lockout_until, username)
-                    )
-                    if hasattr(self.db, 'commit'):
-                        self.db.commit()
-                except Exception as update_error:
-                    self.logger.error(f"Failed to update failed attempts: {update_error}")
-                
-                # Log security event
-                self.logger.warning(
-                    f"Failed login attempt for {username} "
-                    f"(attempt {new_failed_attempts}/5)"
-                )
+                # Increment failed login attempts (automatically locks if threshold reached)
+                new_failed_attempts = self.increment_failed_attempts(user_id)
                 
                 # Generic error message (prevent username enumeration)
                 raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
             
             # Password is valid - reset failed attempts
-            try:
-                self.db.execute(
-                    "UPDATE users SET failed_login_attempts = ? WHERE username = ?",
-                    (0, username)
-                )
-                if hasattr(self.db, 'commit'):
-                    self.db.commit()
-            except Exception as reset_error:
-                self.logger.error(f"Failed to reset failed attempts: {reset_error}")
+            self.reset_failed_attempts(user_id)
             
             # Reset rate limiter attempts on successful password verification
             self.rate_limiter.reset_attempts(username)
@@ -966,54 +918,321 @@ class AuthModule:
             'message': 'Password reset not yet implemented',
         }
     
-    def lockout_user(self, username: str) -> None:
+    def lockout_user(self, user_id: str, minutes: int = 30) -> None:
         """
-        Lock a user account due to security concerns.
+        Lock user account after failed login attempts.
         
-        Locks the user account, preventing login attempts. This is typically
-        called after too many failed authentication attempts or for
-        administrative reasons. This method will be fully implemented in
-        subsequent prompts.
+        Locks the user account for a specified duration to prevent brute-force
+        attacks. Updates the account status in the database and logs the
+        security event.
         
         Args:
-            username: Username of the account to lock
+            user_id: User identifier of the account to lock
+            minutes: Duration to lock the account in minutes (default: 30)
             
         Raises:
             AuthenticationError: If lockout operation fails
             RegistrationError: If user account not found
             
         Example:
-            >>> auth.lockout_user("alice")
-            >>> # Account is now locked
+            >>> auth.lockout_user("user123", minutes=30)
+            >>> # Account is now locked for 30 minutes
         """
-        self.logger.warning(f"Account lockout requested for username: {username}")
+        if not user_id:
+            error_msg = "User ID cannot be empty"
+            self.logger.error(f"Account lockout failed: {error_msg}")
+            raise AuthenticationError(error_msg, error_code="INVALID_USER_ID")
         
-        # Placeholder implementation - will be fully implemented later
-        self.logger.warning("lockout_user() method not yet fully implemented")
+        if self.db is None:
+            error_msg = "Database connection not available"
+            self.logger.error(f"Account lockout failed for {user_id}: {error_msg}")
+            raise AuthenticationError(error_msg, error_code="DATABASE_ERROR")
+        
+        try:
+            current_time = datetime.utcnow()
+            lockout_until = current_time + timedelta(minutes=minutes)
+            lock_reason = "Too many failed login attempts"
+            
+            # Update user record with lockout information
+            # Also increment lockout_count and update last_lockout_time
+            update_query = """
+                UPDATE users 
+                SET account_locked = ?,
+                    account_locked_until = ?,
+                    last_lockout_time = ?,
+                    lockout_count = COALESCE(lockout_count, 0) + 1
+                WHERE user_id = ?
+            """
+            
+            self.db.execute(
+                update_query,
+                (True, lockout_until, current_time, user_id)
+            )
+            
+            if hasattr(self.db, 'commit'):
+                self.db.commit()
+            
+            self.logger.warning(
+                f"Account {user_id} locked for {minutes} minutes "
+                f"(locked until {lockout_until}, reason: {lock_reason})"
+            )
+            
+        except Exception as e:
+            error_msg = f"Failed to lock account: {e}"
+            self.logger.error(f"Account lockout failed for {user_id}: {error_msg}")
+            raise AuthenticationError(error_msg, error_code="LOCKOUT_FAILED") from e
     
-    def unlock_user(self, username: str) -> None:
+    def unlock_user(self, user_id: str) -> None:
         """
         Unlock a previously locked user account.
         
         Removes the lockout status from a user account, allowing login
-        attempts to proceed. This method will be fully implemented in
-        subsequent prompts.
+        attempts to proceed. Resets failed login attempts counter.
         
         Args:
-            username: Username of the account to unlock
+            user_id: User identifier of the account to unlock
             
         Raises:
             AuthenticationError: If unlock operation fails
             RegistrationError: If user account not found
             
         Example:
-            >>> auth.unlock_user("alice")
+            >>> auth.unlock_user("user123")
             >>> # Account is now unlocked
         """
-        self.logger.info(f"Account unlock requested for username: {username}")
+        if not user_id:
+            error_msg = "User ID cannot be empty"
+            self.logger.error(f"Account unlock failed: {error_msg}")
+            raise AuthenticationError(error_msg, error_code="INVALID_USER_ID")
         
-        # Placeholder implementation - will be fully implemented later
-        self.logger.warning("unlock_user() method not yet fully implemented")
+        if self.db is None:
+            error_msg = "Database connection not available"
+            self.logger.error(f"Account unlock failed for {user_id}: {error_msg}")
+            raise AuthenticationError(error_msg, error_code="DATABASE_ERROR")
+        
+        try:
+            # Update user record to unlock account
+            update_query = """
+                UPDATE users 
+                SET account_locked = ?,
+                    account_locked_until = ?,
+                    failed_login_attempts = ?
+                WHERE user_id = ?
+            """
+            
+            self.db.execute(
+                update_query,
+                (False, None, 0, user_id)
+            )
+            
+            if hasattr(self.db, 'commit'):
+                self.db.commit()
+            
+            self.logger.info(f"Account {user_id} unlocked")
+            
+        except Exception as e:
+            error_msg = f"Failed to unlock account: {e}"
+            self.logger.error(f"Account unlock failed for {user_id}: {error_msg}")
+            raise AuthenticationError(error_msg, error_code="UNLOCK_FAILED") from e
+    
+    def is_account_locked(self, user_id: str) -> tuple[bool, str]:
+        """
+        Check if user account is locked.
+        
+        Checks the account lockout status and whether the lockout period
+        has expired. If the lockout period has expired, the account is
+        considered unlocked.
+        
+        Args:
+            user_id: User identifier to check
+            
+        Returns:
+            Tuple of (is_locked: bool, reason: str)
+            - If not locked: (False, "")
+            - If locked: (True, "Account locked until {timestamp}")
+            - If lockout expired: (False, "") (account automatically unlocked)
+            
+        Example:
+            >>> is_locked, reason = auth.is_account_locked("user123")
+            >>> if is_locked:
+            ...     print(reason)
+            Account locked until 2024-12-21 10:30:00 UTC
+        """
+        if not user_id:
+            return False, ""
+        
+        if self.db is None:
+            return False, ""
+        
+        try:
+            cursor = self.db.execute(
+                "SELECT account_locked, account_locked_until FROM users WHERE user_id = ?",
+                (user_id,)
+            )
+            user_record = cursor.fetchone()
+            
+            if user_record is None:
+                return False, ""
+            
+            account_locked, account_locked_until = user_record
+            
+            if not account_locked:
+                return False, ""
+            
+            # Check if lockout period has expired
+            current_time = datetime.utcnow()
+            if account_locked_until and account_locked_until > current_time:
+                # Account is still locked
+                lockout_until_str = account_locked_until.strftime("%Y-%m-%d %H:%M:%S UTC")
+                return True, f"Account locked until {lockout_until_str}"
+            else:
+                # Lockout period expired - unlock account
+                self.check_lock_expiry(user_id)
+                return False, ""
+                
+        except Exception as e:
+            self.logger.error(f"Failed to check account lock status for {user_id}: {e}")
+            return False, ""
+    
+    def check_lock_expiry(self, user_id: str) -> None:
+        """
+        Check if lockout period expired and unlock account if needed.
+        
+        Called at login time to automatically unlock accounts whose lockout
+        period has expired. Resets failed login attempts counter.
+        
+        Args:
+            user_id: User identifier to check
+            
+        Example:
+            >>> auth.check_lock_expiry("user123")
+            >>> # Account unlocked if lockout period expired
+        """
+        if not user_id:
+            return
+        
+        if self.db is None:
+            return
+        
+        try:
+            cursor = self.db.execute(
+                "SELECT account_locked, account_locked_until FROM users WHERE user_id = ?",
+                (user_id,)
+            )
+            user_record = cursor.fetchone()
+            
+            if user_record is None:
+                return
+            
+            account_locked, account_locked_until = user_record
+            
+            if not account_locked:
+                return
+            
+            # Check if lockout period has expired
+            current_time = datetime.utcnow()
+            if account_locked_until and account_locked_until <= current_time:
+                # Lockout expired - unlock account
+                self.unlock_user(user_id)
+                self.logger.info(f"Lockout period expired for {user_id}, account unlocked")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to check lock expiry for {user_id}: {e}")
+    
+    def increment_failed_attempts(self, user_id: str) -> int:
+        """
+        Increment failed login counter for user.
+        
+        Increments the failed login attempts counter. If the counter reaches
+        the threshold (5 attempts), automatically locks the account for 30 minutes.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            New failed attempts count
+            
+        Example:
+            >>> count = auth.increment_failed_attempts("user123")
+            >>> print(f"Failed attempts: {count}")
+            Failed attempts: 3
+        """
+        if not user_id:
+            return 0
+        
+        if self.db is None:
+            return 0
+        
+        try:
+            # Get current failed attempts count
+            cursor = self.db.execute(
+                "SELECT failed_login_attempts FROM users WHERE user_id = ?",
+                (user_id,)
+            )
+            user_record = cursor.fetchone()
+            
+            if user_record is None:
+                return 0
+            
+            current_attempts = user_record[0] or 0
+            new_attempts = current_attempts + 1
+            
+            # Update failed attempts count
+            self.db.execute(
+                "UPDATE users SET failed_login_attempts = ? WHERE user_id = ?",
+                (new_attempts, user_id)
+            )
+            
+            if hasattr(self.db, 'commit'):
+                self.db.commit()
+            
+            # Check if threshold reached (5 attempts)
+            if new_attempts >= 5:
+                # Automatically lock account for 30 minutes
+                self.lockout_user(user_id, minutes=30)
+            
+            self.logger.warning(f"Failed login attempt for user {user_id} (attempt {new_attempts}/5)")
+            
+            return new_attempts
+            
+        except Exception as e:
+            self.logger.error(f"Failed to increment failed attempts for {user_id}: {e}")
+            return 0
+    
+    def reset_failed_attempts(self, user_id: str) -> None:
+        """
+        Reset failed login attempts counter on successful login.
+        
+        Resets the failed login attempts counter to 0 when user successfully
+        authenticates. This allows legitimate users to continue using the
+        system without being locked out.
+        
+        Args:
+            user_id: User identifier
+            
+        Example:
+            >>> auth.reset_failed_attempts("user123")
+            >>> # Failed attempts counter reset to 0
+        """
+        if not user_id:
+            return
+        
+        if self.db is None:
+            return
+        
+        try:
+            self.db.execute(
+                "UPDATE users SET failed_login_attempts = ? WHERE user_id = ?",
+                (0, user_id)
+            )
+            
+            if hasattr(self.db, 'commit'):
+                self.db.commit()
+            
+            self.logger.info(f"Failed login attempts reset for user {user_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to reset failed attempts for {user_id}: {e}")
     
     def check_account_status(self, username: str) -> dict[str, Any]:
         """
