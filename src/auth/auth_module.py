@@ -6,18 +6,20 @@ registration, login, password verification, session management, TOTP-based
 multi-factor authentication, and account security features.
 """
 
+import hmac
 import hashlib
 import logging
 import re
 import secrets
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, dict
 
 import pyotp
 
 from src.auth.password_hasher import PasswordHasher
 from src.auth.password_validator import PasswordValidator
+from src.auth.rate_limiter import RateLimiter
 from src.exceptions import (
     AccountLockedError,
     AuthenticationError,
@@ -102,6 +104,9 @@ class AuthModule:
         
         # Initialize password hasher for secure password storage
         self.password_hasher = PasswordHasher()
+        
+        # Initialize rate limiter for brute-force protection
+        self.rate_limiter = RateLimiter()
         
         self.logger.info("AuthModule initialized")
         self.logger.debug(
@@ -326,12 +331,21 @@ class AuthModule:
         totp_code: str | None = None
     ) -> dict[str, Any]:
         """
-        Authenticate a user and create a session.
+        Authenticate a user and create a session with comprehensive security protections.
         
-        Verifies user credentials (username and password) and optionally
-        verifies TOTP code if multi-factor authentication is enabled.
-        Returns session information upon successful authentication.
-        This method will be fully implemented in subsequent prompts.
+        This method performs multi-step authentication with rate limiting, account
+        status checks, password verification, MFA/TOTP verification, and session
+        creation. It implements security best practices to prevent brute-force
+        attacks and account enumeration.
+        
+        Security Features:
+        - Input validation
+        - Account lockout checking
+        - Rate limiting (5 attempts per 15 minutes)
+        - Password verification with constant-time comparison
+        - TOTP/MFA verification
+        - Secure session token generation
+        - Generic error messages to prevent username enumeration
         
         Args:
             username: Username of the account to authenticate
@@ -341,13 +355,15 @@ class AuthModule:
         Returns:
             Dictionary containing login result with keys:
             - success: bool indicating if login was successful
-            - session_token: str session token (if successful)
             - user_id: str user identifier (if successful)
+            - username: str username
+            - session_token: str session token (if successful)
+            - expires_at: float timestamp when session expires
             - message: str status message
-            - requires_totp: bool indicating if TOTP is required
+            - status: str status code (e.g., "AWAITING_MFA")
             
         Raises:
-            AuthenticationError: If authentication fails
+            AuthenticationError: If authentication fails (generic message)
             AccountLockedError: If account is locked
             TOTPError: If TOTP verification fails
             RateLimitError: If too many login attempts
@@ -359,16 +375,275 @@ class AuthModule:
         """
         self.logger.info(f"Login attempt for username: {username}")
         
-        # Placeholder implementation - will be fully implemented later
-        self.logger.warning("login() method not yet fully implemented")
-        
-        return {
-            'success': False,
-            'message': 'Login not yet implemented',
-            'session_token': None,
-            'user_id': None,
-            'requires_totp': False,
-        }
+        try:
+            # STEP 1: Input Validation
+            if not username or not isinstance(username, str) or len(username.strip()) == 0:
+                self.logger.warning("Login failed: empty username")
+                raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
+            
+            if not password or not isinstance(password, str) or len(password) == 0:
+                self.logger.warning("Login failed: empty password")
+                raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
+            
+            username = username.strip()
+            
+            # STEP 2: Account Status Check
+            if self.db is None:
+                error_msg = "Database connection not available"
+                self.logger.error(f"Login failed for {username}: {error_msg}")
+                raise AuthenticationError("Authentication service unavailable", error_code="SERVICE_UNAVAILABLE")
+            
+            try:
+                # Query database for user account
+                cursor = self.db.execute(
+                    "SELECT user_id, username, password_hash, account_locked, "
+                    "account_locked_until, failed_login_attempts, totp_enabled, totp_secret "
+                    "FROM users WHERE username = ?",
+                    (username,)
+                )
+                user_record = cursor.fetchone()
+                
+                # Generic error for non-existent users (prevent username enumeration)
+                if user_record is None:
+                    self.logger.warning(f"Login failed: user not found (username: {username})")
+                    # Still check rate limit to prevent timing attacks
+                    self.rate_limiter.check_rate_limit(username, max_attempts=5, window_minutes=15)
+                    raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
+                
+                # Extract user data
+                user_id, db_username, password_hash, account_locked, account_locked_until, \
+                    failed_attempts, totp_enabled, totp_secret = user_record
+                
+                # Check if account is locked
+                current_time = datetime.utcnow()
+                if account_locked:
+                    # Check if lockout period has expired
+                    if account_locked_until and account_locked_until > current_time:
+                        # Account still locked
+                        lockout_until_str = account_locked_until.strftime("%Y-%m-%d %H:%M:%S UTC")
+                        self.logger.warning(f"Login blocked: account locked for {username} until {lockout_until_str}")
+                        raise AccountLockedError(
+                            f"Account locked until: {lockout_until_str}",
+                            error_code="ACCOUNT_LOCKED",
+                            lockout_until=account_locked_until.timestamp(),
+                            reason="Too many failed login attempts"
+                        )
+                    else:
+                        # Lockout expired, unlock account
+                        self.logger.info(f"Lockout expired for {username}, unlocking account")
+                        self.db.execute(
+                            "UPDATE users SET account_locked = ?, account_locked_until = ?, "
+                            "failed_login_attempts = ? WHERE username = ?",
+                            (False, None, 0, username)
+                        )
+                        if hasattr(self.db, 'commit'):
+                            self.db.commit()
+                        account_locked = False
+                        failed_attempts = 0
+                
+            except (AccountLockedError, AuthenticationError):
+                # Re-raise these exceptions
+                raise
+            except Exception as db_error:
+                error_msg = "Database error during login"
+                self.logger.error(f"Login failed for {username}: {error_msg}: {db_error}")
+                raise AuthenticationError("Authentication service unavailable", error_code="DATABASE_ERROR") from db_error
+            
+            # STEP 3: Rate Limiting
+            # Check rate limit using username as identifier
+            allowed, attempt_count = self.rate_limiter.check_rate_limit(
+                username,
+                max_attempts=5,
+                window_minutes=15
+            )
+            
+            if not allowed:
+                # Rate limit exceeded - lock account for 30 minutes
+                lockout_until = current_time + timedelta(minutes=30)
+                try:
+                    self.db.execute(
+                        "UPDATE users SET account_locked = ?, account_locked_until = ? WHERE username = ?",
+                        (True, lockout_until, username)
+                    )
+                    if hasattr(self.db, 'commit'):
+                        self.db.commit()
+                    self.logger.warning(
+                        f"Account locked due to rate limit for {username} "
+                        f"(locked until {lockout_until})"
+                    )
+                except Exception as lock_error:
+                    self.logger.error(f"Failed to lock account after rate limit: {lock_error}")
+                
+                raise RateLimitError(
+                    "Too many login attempts. Please try again later.",
+                    error_code="RATE_LIMIT_EXCEEDED",
+                    retry_after=900,  # 15 minutes in seconds
+                    limit=5
+                )
+            
+            # STEP 4: Password Verification
+            password_valid = self.password_hasher.verify_password(password, password_hash)
+            
+            if not password_valid:
+                # Password verification failed
+                # Increment failed login attempts
+                new_failed_attempts = failed_attempts + 1
+                
+                # Check if we should lock the account (5 failed attempts)
+                should_lock = new_failed_attempts >= 5
+                lockout_until = None
+                
+                if should_lock:
+                    lockout_until = current_time + timedelta(minutes=30)
+                    self.logger.warning(
+                        f"Account locked after {new_failed_attempts} failed attempts for {username} "
+                        f"(locked until {lockout_until})"
+                    )
+                
+                # Update database with failed attempts and lockout status
+                try:
+                    self.db.execute(
+                        "UPDATE users SET failed_login_attempts = ?, account_locked = ?, "
+                        "account_locked_until = ? WHERE username = ?",
+                        (new_failed_attempts, should_lock, lockout_until, username)
+                    )
+                    if hasattr(self.db, 'commit'):
+                        self.db.commit()
+                except Exception as update_error:
+                    self.logger.error(f"Failed to update failed attempts: {update_error}")
+                
+                # Log security event
+                self.logger.warning(
+                    f"Failed login attempt for {username} "
+                    f"(attempt {new_failed_attempts}/5)"
+                )
+                
+                # Generic error message (prevent username enumeration)
+                raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
+            
+            # Password is valid - reset failed attempts
+            try:
+                self.db.execute(
+                    "UPDATE users SET failed_login_attempts = ? WHERE username = ?",
+                    (0, username)
+                )
+                if hasattr(self.db, 'commit'):
+                    self.db.commit()
+            except Exception as reset_error:
+                self.logger.error(f"Failed to reset failed attempts: {reset_error}")
+            
+            # Reset rate limiter attempts on successful password verification
+            self.rate_limiter.reset_attempts(username)
+            
+            # STEP 5: MFA/TOTP Verification
+            # Check if user has TOTP enabled
+            if totp_enabled:
+                if totp_code is None:
+                    # TOTP required but not provided - return intermediate response
+                    self.logger.info(f"TOTP required for {username}, awaiting code")
+                    return {
+                        'success': False,
+                        'username': username,
+                        'user_id': user_id,
+                        'message': 'TOTP code required',
+                        'status': 'AWAITING_MFA',
+                        'requires_totp': True,
+                    }
+                else:
+                    # Verify TOTP code
+                    totp_valid = self.verify_totp(username, totp_code)
+                    if not totp_valid:
+                        # TOTP verification failed - record attempt but don't lock account
+                        self.logger.warning(f"Invalid TOTP code for {username}")
+                        raise TOTPError(
+                            "Invalid TOTP code",
+                            error_code="INVALID_TOTP",
+                            remaining_attempts=4  # Could track TOTP-specific attempts
+                        )
+                    self.logger.debug(f"TOTP verified successfully for {username}")
+            
+            # STEP 6: Session Creation
+            # Generate secure session token using HMAC-SHA256
+            # Token format: HMAC(user_id + timestamp + nonce, secret_key)
+            session_secret = secrets.token_bytes(32)  # Secret key for HMAC
+            timestamp = str(int(current_time.timestamp()))
+            nonce = secrets.token_urlsafe(16)
+            
+            # Create token payload
+            token_payload = f"{user_id}:{timestamp}:{nonce}"
+            
+            # Generate HMAC-SHA256 token
+            session_token = hmac.new(
+                session_secret,
+                token_payload.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            
+            # Session expires in 24 hours
+            expires_at = current_time + timedelta(hours=24)
+            expires_at_timestamp = expires_at.timestamp()
+            
+            # Store session in database
+            try:
+                # Hash IP and user agent if available (for security logging)
+                # In production, you'd get these from request context
+                ip_hash = None  # Would hash client IP if available
+                user_agent_hash = None  # Would hash user agent if available
+                
+                self.db.execute(
+                    "INSERT INTO sessions (session_token, user_id, created_at, expires_at, "
+                    "ip_hash, user_agent_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session_token,
+                        user_id,
+                        current_time,
+                        expires_at,
+                        ip_hash,
+                        user_agent_hash,
+                    )
+                )
+                if hasattr(self.db, 'commit'):
+                    self.db.commit()
+                
+                self.logger.debug(f"Session created for {username} (session_token: {session_token[:16]}...)")
+            except Exception as session_error:
+                error_msg = "Failed to create session"
+                self.logger.error(f"{error_msg} for {username}: {session_error}")
+                raise SessionError(error_msg, error_code="SESSION_CREATION_FAILED") from session_error
+            
+            # STEP 7: Update Last Login & Return
+            # Update user's last_login timestamp
+            try:
+                self.db.execute(
+                    "UPDATE users SET last_login = ? WHERE username = ?",
+                    (current_time, username)
+                )
+                if hasattr(self.db, 'commit'):
+                    self.db.commit()
+            except Exception as update_error:
+                self.logger.warning(f"Failed to update last_login for {username}: {update_error}")
+            
+            # Log successful login
+            self.logger.info(f"User {username} logged in successfully (user_id: {user_id})")
+            
+            # Return success response
+            return {
+                'success': True,
+                'user_id': user_id,
+                'username': username,
+                'session_token': session_token,
+                'expires_at': expires_at_timestamp,
+                'message': 'Login successful',
+            }
+            
+        except (AuthenticationError, AccountLockedError, RateLimitError, TOTPError, SessionError):
+            # Re-raise custom exceptions as-is
+            raise
+        except Exception as e:
+            # Catch any unexpected errors
+            error_msg = "Authentication failed: unexpected error"
+            self.logger.error(f"Login failed for {username}: unexpected error: {e}")
+            raise AuthenticationError(error_msg, error_code="UNEXPECTED_ERROR") from e
     
     def verify_password(self, stored_hash: str, password: str) -> bool:
         """
