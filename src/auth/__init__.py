@@ -11,6 +11,7 @@ from src.auth.backup_codes import BackupCodesManager
 from src.auth.password_validator import PasswordValidator
 from src.auth.rate_limiter import RateLimiter
 from src.auth.session_manager import SessionManager
+from src.auth.totp import TOTPManager
 
 __all__ = [
     'AuthModule',
@@ -18,5 +19,6 @@ __all__ = [
     'PasswordValidator',
     'RateLimiter',
     'SessionManager',
+    'TOTPManager',
 ]
 
