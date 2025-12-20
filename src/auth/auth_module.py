@@ -17,9 +17,11 @@ from typing import Any, dict
 
 import pyotp
 
+from src.auth.backup_codes import BackupCodesManager
 from src.auth.password_hasher import PasswordHasher
 from src.auth.password_validator import PasswordValidator
 from src.auth.rate_limiter import RateLimiter
+from src.auth.totp import TOTPManager
 from src.exceptions import (
     AccountLockedError,
     AuthenticationError,
@@ -107,6 +109,17 @@ class AuthModule:
         
         # Initialize rate limiter for brute-force protection
         self.rate_limiter = RateLimiter()
+        
+        # Initialize TOTP manager for two-factor authentication
+        self.totp_manager = TOTPManager(
+            issuer=self.totp_settings.get('issuer', 'CryptoVault'),
+            digits=self.totp_settings.get('digits', 6),
+            interval=self.totp_settings.get('interval', 30),
+            db=self.db
+        )
+        
+        # Initialize backup codes manager
+        self.backup_codes_manager = BackupCodesManager()
         
         self.logger.info("AuthModule initialized")
         self.logger.debug(
@@ -328,7 +341,8 @@ class AuthModule:
         self,
         username: str,
         password: str,
-        totp_code: str | None = None
+        totp_code: str | None = None,
+        backup_code: str | None = None
     ) -> dict[str, Any]:
         """
         Authenticate a user and create a session with comprehensive security protections.
@@ -351,6 +365,7 @@ class AuthModule:
             username: Username of the account to authenticate
             password: Password for the account
             totp_code: Optional TOTP code for multi-factor authentication
+            backup_code: Optional backup code (used if TOTP unavailable)
             
         Returns:
             Dictionary containing login result with keys:
@@ -397,7 +412,8 @@ class AuthModule:
                 # Query database for user account
                 cursor = self.db.execute(
                     "SELECT user_id, username, password_hash, account_locked, "
-                    "account_locked_until, failed_login_attempts, totp_enabled, totp_secret "
+                    "account_locked_until, failed_login_attempts, totp_enabled, totp_secret, "
+                    "backup_codes_hash "
                     "FROM users WHERE username = ?",
                     (username,)
                 )
@@ -412,7 +428,7 @@ class AuthModule:
                 
                 # Extract user data
                 user_id, db_username, password_hash, account_locked, account_locked_until, \
-                    failed_attempts, totp_enabled, totp_secret = user_record
+                    failed_attempts, totp_enabled, totp_secret, backup_codes_hash = user_record
                 
                 # Check if account is locked
                 current_time = datetime.utcnow()
@@ -537,30 +553,101 @@ class AuthModule:
             
             # STEP 5: MFA/TOTP Verification
             # Check if user has TOTP enabled
+            mfa_verified = False
+            
             if totp_enabled:
-                if totp_code is None:
-                    # TOTP required but not provided - return intermediate response
-                    self.logger.info(f"TOTP required for {username}, awaiting code")
+                # User has TOTP enabled - require MFA
+                if totp_code is None and backup_code is None:
+                    # MFA required but not provided - return intermediate response
+                    self.logger.info(f"MFA required for {username}, awaiting TOTP or backup code")
                     return {
                         'success': False,
                         'username': username,
                         'user_id': user_id,
-                        'message': 'TOTP code required',
+                        'message': 'Please enter your TOTP code or backup code',
                         'status': 'AWAITING_MFA',
+                        'requires_mfa': True,
                         'requires_totp': True,
                     }
-                else:
-                    # Verify TOTP code
-                    totp_valid = self.verify_totp(username, totp_code)
+                
+                # User provided either TOTP code or backup code
+                # Priority: TOTP code first, then backup code
+                
+                if totp_code is not None:
+                    # Verify TOTP code using TOTPManager
+                    if not totp_secret:
+                        error_msg = "TOTP enabled but secret not found"
+                        self.logger.error(f"MFA verification failed for {username}: {error_msg}")
+                        raise TOTPError(error_msg, error_code="TOTP_SECRET_MISSING")
+                    
+                    totp_valid = self.totp_manager.verify_totp(totp_secret, totp_code, time_window=1)
+                    
                     if not totp_valid:
-                        # TOTP verification failed - record attempt but don't lock account
-                        self.logger.warning(f"Invalid TOTP code for {username}")
+                        # TOTP verification failed
+                        self.logger.warning(f"TOTP verification failed for {username}")
                         raise TOTPError(
-                            "Invalid TOTP code",
+                            "Invalid TOTP code or expired",
                             error_code="INVALID_TOTP",
                             remaining_attempts=4  # Could track TOTP-specific attempts
                         )
-                    self.logger.debug(f"TOTP verified successfully for {username}")
+                    
+                    # TOTP verified successfully
+                    self.logger.info(f"TOTP verified successfully for {username}")
+                    mfa_verified = True
+                    
+                elif backup_code is not None:
+                    # User provided backup code instead of TOTP
+                    # Verify backup code
+                    if not backup_codes_hash:
+                        error_msg = "No backup codes available"
+                        self.logger.warning(f"Backup code verification failed for {username}: {error_msg}")
+                        raise TOTPError(error_msg, error_code="NO_BACKUP_CODES")
+                    
+                    # Parse backup codes hash (comma-separated)
+                    code_hashes = backup_codes_hash.split(',') if backup_codes_hash else []
+                    
+                    if not code_hashes:
+                        error_msg = "No backup codes available"
+                        self.logger.warning(f"Backup code verification failed for {username}: {error_msg}")
+                        raise TOTPError(error_msg, error_code="NO_BACKUP_CODES")
+                    
+                    # Verify backup code
+                    is_valid, code_index = self.backup_codes_manager.verify_code(
+                        backup_code,
+                        code_hashes
+                    )
+                    
+                    if not is_valid:
+                        # Backup code verification failed
+                        self.logger.warning(f"Invalid backup code for {username}")
+                        raise TOTPError(
+                            "Invalid backup code",
+                            error_code="INVALID_BACKUP_CODE"
+                        )
+                    
+                    # Backup code is valid - use it (remove from list)
+                    try:
+                        self.backup_codes_manager.use_code(username, code_index, db=self.db)
+                        self.logger.info(
+                            f"Backup code used for {username} "
+                            f"(code_index: {code_index}, user_id: {user_id})"
+                        )
+                        mfa_verified = True
+                    except Exception as use_error:
+                        error_msg = f"Failed to use backup code: {use_error}"
+                        self.logger.error(f"Backup code usage failed for {username}: {error_msg}")
+                        # Code was valid but couldn't mark as used - still allow login
+                        # but log the error
+                        mfa_verified = True
+            else:
+                # User doesn't have TOTP enabled - no MFA required
+                mfa_verified = True
+            
+            # If MFA is required but not verified, don't proceed
+            if totp_enabled and not mfa_verified:
+                error_msg = "MFA verification required but not completed"
+                self.logger.warning(f"MFA verification incomplete for {username}: {error_msg}")
+                raise TOTPError(error_msg, error_code="MFA_REQUIRED")
             
             # STEP 6: Session Creation
             # Generate secure session token using HMAC-SHA256
@@ -753,7 +840,8 @@ class AuthModule:
         Verify a TOTP code for a user.
         
         Validates a TOTP code provided by the user against their stored
-        TOTP secret. This method will be fully implemented in subsequent prompts.
+        TOTP secret. This method retrieves the user's TOTP secret from the
+        database and verifies the code using TOTPManager.
         
         Args:
             username: Username of the account
@@ -773,10 +861,53 @@ class AuthModule:
         """
         self.logger.debug(f"TOTP verification requested for username: {username}")
         
-        # Placeholder implementation - will be fully implemented later
-        self.logger.warning("verify_totp() method not yet fully implemented")
+        if self.db is None:
+            error_msg = "Database connection not available"
+            self.logger.error(f"TOTP verification failed for {username}: {error_msg}")
+            raise TOTPError(error_msg, error_code="DATABASE_ERROR")
         
-        return False
+        try:
+            # Get user's TOTP secret from database
+            cursor = self.db.execute(
+                "SELECT totp_secret, totp_enabled FROM users WHERE username = ?",
+                (username,)
+            )
+            user_record = cursor.fetchone()
+            
+            if user_record is None:
+                error_msg = "User not found"
+                self.logger.warning(f"TOTP verification failed for {username}: {error_msg}")
+                raise TOTPError(error_msg, error_code="USER_NOT_FOUND")
+            
+            totp_secret, totp_enabled = user_record
+            
+            if not totp_enabled:
+                error_msg = "TOTP is not enabled for this user"
+                self.logger.warning(f"TOTP verification failed for {username}: {error_msg}")
+                raise TOTPError(error_msg, error_code="TOTP_NOT_ENABLED")
+            
+            if not totp_secret:
+                error_msg = "TOTP secret not found"
+                self.logger.error(f"TOTP verification failed for {username}: {error_msg}")
+                raise TOTPError(error_msg, error_code="TOTP_SECRET_MISSING")
+            
+            # Verify TOTP code using TOTPManager
+            is_valid = self.totp_manager.verify_totp(totp_secret, totp_code, time_window=1)
+            
+            if is_valid:
+                self.logger.info(f"TOTP verified successfully for {username}")
+            else:
+                self.logger.warning(f"TOTP verification failed for {username}: invalid code")
+            
+            return is_valid
+            
+        except TOTPError:
+            # Re-raise TOTP errors
+            raise
+        except Exception as e:
+            error_msg = f"TOTP verification error: {e}"
+            self.logger.error(f"TOTP verification failed for {username}: {error_msg}")
+            raise TOTPError(error_msg, error_code="VERIFICATION_ERROR") from e
     
     def reset_password(
         self,
