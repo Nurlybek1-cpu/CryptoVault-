@@ -9,10 +9,12 @@ management, and account security features.
 from src.auth.auth_module import AuthModule
 from src.auth.backup_codes import BackupCodesManager
 from src.auth.password_validator import PasswordValidator
+from src.auth.rate_limiter import RateLimiter
 
 __all__ = [
     'AuthModule',
     'BackupCodesManager',
     'PasswordValidator',
+    'RateLimiter',
 ]
 
