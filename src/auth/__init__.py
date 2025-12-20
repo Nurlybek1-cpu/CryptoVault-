@@ -7,10 +7,12 @@ management, and account security features.
 """
 
 from src.auth.auth_module import AuthModule
+from src.auth.backup_codes import BackupCodesManager
 from src.auth.password_validator import PasswordValidator
 
 __all__ = [
     'AuthModule',
+    'BackupCodesManager',
     'PasswordValidator',
 ]
 
