@@ -36,7 +36,7 @@ import logging
 import secrets
 from typing import Any
 
-from cryptography.hazmat.primitives import constant_time
+from cryptography.hazmat.primitives import constant_time  # type: ignore
 
 logger = logging.getLogger(__name__)
 

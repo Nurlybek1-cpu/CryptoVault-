@@ -33,8 +33,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import pyotp
-import qrcode
+import pyotp  # type: ignore
+import qrcode  # type: ignore
 
 from src.exceptions import TOTPError
 

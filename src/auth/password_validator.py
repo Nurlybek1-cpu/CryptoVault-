@@ -8,7 +8,7 @@ protection against common weak patterns and sequential sequences.
 
 import re
 import logging
-from typing import tuple
+# tuple is a built-in type in Python 3.9+
 
 logger = logging.getLogger(__name__)
 
