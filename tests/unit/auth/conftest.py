@@ -6,7 +6,7 @@ module, including test data, mock database connections, and initialized
 AuthModule instances.
 """
 
-import pytest
+import pytest  # type: ignore
 from unittest.mock import Mock, MagicMock
 from datetime import datetime
 
@@ -22,7 +22,7 @@ def test_username():
 @pytest.fixture
 def test_password():
     """Fixture providing a valid strong test password."""
-    return "ValidPassword123!"
+    return "MySecureP@ssw0rd!"
 
 
 @pytest.fixture
