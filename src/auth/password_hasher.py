@@ -21,8 +21,8 @@ References:
 import logging
 import secrets
 
-from argon2 import PasswordHasher, Type
-from argon2.exceptions import InvalidHashError, PasswordHashError, VerifyMismatchError
+from argon2 import PasswordHasher as Argon2PasswordHasher  # type: ignore
+from argon2.exceptions import InvalidHashError, HashingError, VerifyMismatchError  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -84,14 +84,14 @@ class PasswordHasher:
         self.salt_len = salt_len
         
         # Initialize Argon2id hasher
-        # Type.ID specifies Argon2id variant (recommended for password hashing)
-        self.hasher = PasswordHasher(
+        # Argon2PasswordHasher defaults to Argon2id variant (recommended for password hashing)
+        # No need to specify type parameter - Argon2id is the default
+        self.hasher = Argon2PasswordHasher(
             time_cost=time_cost,
             memory_cost=memory_cost,
             parallelism=parallelism,
             hash_len=hash_len,
-            salt_len=salt_len,
-            type=Type.ID  # Argon2id variant
+            salt_len=salt_len
         )
         
         logger.info(
@@ -121,7 +121,7 @@ class PasswordHasher:
             Format: $argon2id$v=19$m=65536,t=2,p=1$salt$hash
             
         Raises:
-            PasswordHashError: If hashing fails (should not occur in normal operation)
+            HashingError: If hashing fails (should not occur in normal operation)
             
         Example:
             >>> hasher = PasswordHasher()
@@ -155,14 +155,14 @@ class PasswordHasher:
             
             return password_hash
             
-        except PasswordHashError as e:
-            # PasswordHashError is raised for invalid parameters or internal errors
-            logger.error(f"Password hashing failed with PasswordHashError: {e}")
+        except HashingError as e:
+            # HashingError is raised for invalid parameters or internal errors
+            logger.error(f"Password hashing failed with HashingError: {e}")
             raise
         except Exception as e:
             # Catch any unexpected errors
             logger.error(f"Unexpected error during password hashing: {e}")
-            raise PasswordHashError(f"Password hashing failed: {e}") from e
+            raise HashingError(f"Password hashing failed: {e}") from e
     
     def verify_password(self, password: str, password_hash: str) -> bool:
         """
