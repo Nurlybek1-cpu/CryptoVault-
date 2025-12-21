@@ -13,9 +13,9 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, dict
+from typing import Any
 
-import pyotp
+import pyotp  # type: ignore
 
 from src.auth.backup_codes import BackupCodesManager
 from src.auth.password_hasher import PasswordHasher
