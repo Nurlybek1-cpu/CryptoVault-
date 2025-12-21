@@ -13,7 +13,7 @@ This test suite covers all authentication functionality including:
 - Account lockout
 """
 
-import pytest
+import pytest  # type: ignore
 import time
 import hashlib
 from unittest.mock import Mock, patch, MagicMock
@@ -46,7 +46,9 @@ class TestPasswordValidator:
     def test_valid_password(self):
         """Test that a strong password passes validation."""
         validator = PasswordValidator()
-        is_valid, error_msg = validator.validate("ValidPassword123!")
+        # Use password without sequential patterns or weak words
+        # "V@lidTestP@ss!7" - 15 chars, has uppercase, lowercase, numbers, special chars, no sequences
+        is_valid, error_msg = validator.validate("V@lidTestP@ss!7")
         assert is_valid is True
         assert error_msg == ""
     
@@ -88,7 +90,9 @@ class TestPasswordValidator:
     def test_sequential_pattern(self):
         """Test that sequential patterns like '123456' are rejected."""
         validator = PasswordValidator()
-        is_valid, error_msg = validator.validate("Password123456!")
+        # Use password with sequential pattern but no common weak patterns
+        # "MySecure123abc!" contains "123" and "abc" sequential patterns
+        is_valid, error_msg = validator.validate("MySecure123abc!")
         assert is_valid is False
         assert "sequential" in error_msg.lower()
     
