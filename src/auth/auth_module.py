@@ -219,6 +219,9 @@ class AuthModule:
                     self.logger.warning(f"Registration failed for {username}: {error_msg}")
                     raise RegistrationError(error_msg, error_code="USERNAME_EXISTS", field="username")
                     
+            except RegistrationError:
+                # Re-raise RegistrationError as-is (e.g., username already exists)
+                raise
             except Exception as db_error:
                 # Re-raise database errors as RegistrationError
                 error_msg = f"Database error during user check: {db_error}"
