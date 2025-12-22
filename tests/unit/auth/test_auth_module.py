@@ -16,6 +16,7 @@ This test suite covers all authentication functionality including:
 import pytest  # type: ignore
 import time
 import hashlib
+import pyotp  # type: ignore
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
 
@@ -400,7 +401,6 @@ class TestLogin:
         totp_secret = result["totp_secret"]
         
         # Enable TOTP
-        import pyotp
         totp = pyotp.TOTP(totp_secret)
         auth_module.totp_manager.enable_totp(
             result["user_id"],
@@ -584,8 +584,6 @@ class TestTOTP:
     
     def test_verify_totp_valid_code(self, auth_module):
         """Test that valid TOTP codes are verified successfully."""
-        import pyotp
-        
         # Generate secret
         secret = pyotp.random_base32()
         
@@ -599,8 +597,6 @@ class TestTOTP:
     
     def test_verify_totp_invalid_code(self, auth_module):
         """Test that invalid TOTP codes are rejected."""
-        import pyotp
-        
         secret = pyotp.random_base32()
         invalid_code = "000000"
         
@@ -609,9 +605,6 @@ class TestTOTP:
     
     def test_verify_totp_allows_time_window(self, auth_module):
         """Test that TOTP verification allows time window (±30 seconds)."""
-        import pyotp
-        import time
-        
         secret = pyotp.random_base32()
         totp = pyotp.TOTP(secret)
         
@@ -624,8 +617,6 @@ class TestTOTP:
     
     def test_enable_totp(self, auth_module, mock_database):
         """Test that TOTP can be enabled after verification."""
-        import pyotp
-        
         user_id = "test_user_id"
         secret = pyotp.random_base32()
         
