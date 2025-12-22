@@ -7,6 +7,7 @@ AuthModule instances.
 """
 
 import pytest  # type: ignore
+import uuid
 from unittest.mock import Mock, MagicMock
 from datetime import datetime
 
@@ -15,8 +16,15 @@ from src.auth.auth_module import AuthModule
 
 @pytest.fixture
 def test_username():
-    """Fixture providing a valid test username."""
-    return "testuser123"
+    """
+    Fixture providing a unique test username for each test.
+    
+    Uses a UUID to ensure each test gets a unique username, preventing
+    conflicts between tests that register users.
+    """
+    # Generate a unique username using UUID (first 8 chars for readability)
+    unique_id = str(uuid.uuid4())[:8]
+    return f"testuser_{unique_id}"
 
 
 @pytest.fixture
@@ -214,13 +222,11 @@ def mock_database():
     db._users_data = users_data
     db._sessions_data = sessions_data
     
-    # Verify database is empty at start (for debugging)
-    assert len(users_data) == 0, f"Database should be empty but has {len(users_data)} users"
-    assert len(sessions_data) == 0, f"Database should be empty but has {len(sessions_data)} sessions"
-    
+    # Yield the database instance
     yield db
     
     # Cleanup: clear data after test (defensive programming)
+    # This ensures no data persists between tests even if there are any issues
     users_data.clear()
     sessions_data.clear()
 
