@@ -219,14 +219,17 @@ class TestRegistration:
         assert "backup_codes" in result
         assert len(result["backup_codes"]) == 10
     
-    def test_register_duplicate_username(self, auth_module, test_username, test_password):
+    def test_register_duplicate_username(self, auth_module, test_password):
         """Test that duplicate usernames are rejected."""
+        # Use a unique username for this test to avoid conflicts with other tests
+        unique_username = "duplicate_test_user"
+        
         # Register first user
-        auth_module.register(test_username, test_password)
+        auth_module.register(unique_username, test_password)
         
         # Attempt to register with same username
         with pytest.raises(RegistrationError) as exc_info:
-            auth_module.register(test_username, test_password)
+            auth_module.register(unique_username, test_password)
         
         assert exc_info.value.error_code == "USERNAME_EXISTS"
     

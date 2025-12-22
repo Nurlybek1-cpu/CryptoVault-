@@ -47,6 +47,7 @@ def mock_database():
     db = MagicMock()
     
     # Mock data storage - fresh for each test
+    # Create new dict instances to ensure no shared state
     users_data = {}
     sessions_data = {}
     
@@ -213,7 +214,15 @@ def mock_database():
     db._users_data = users_data
     db._sessions_data = sessions_data
     
-    return db
+    # Verify database is empty at start (for debugging)
+    assert len(users_data) == 0, f"Database should be empty but has {len(users_data)} users"
+    assert len(sessions_data) == 0, f"Database should be empty but has {len(sessions_data)} sessions"
+    
+    yield db
+    
+    # Cleanup: clear data after test (defensive programming)
+    users_data.clear()
+    sessions_data.clear()
 
 
 @pytest.fixture(scope="function")
