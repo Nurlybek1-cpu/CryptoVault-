@@ -31,7 +31,7 @@ def test_weak_password():
     return "weak"
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def mock_database():
     """
     Fixture providing a mock database connection.
@@ -40,10 +40,13 @@ def mock_database():
     - execute() method that returns a mock cursor
     - commit() method for transactions
     - Stores mock data in memory for testing
+    
+    Note: This fixture is function-scoped to ensure each test gets a fresh
+    database instance with no persisted state from previous tests.
     """
     db = MagicMock()
     
-    # Mock data storage
+    # Mock data storage - fresh for each test
     users_data = {}
     sessions_data = {}
     
@@ -56,14 +59,24 @@ def mock_database():
             if params and "username = ?" in query:
                 username = params[0]
                 user = users_data.get(username)
-                if user and "user_id, username, password_hash, account_locked" in query:
-                    # Return data matching the login query order
-                    cursor.fetchone.return_value = (
-                        user[0], user[1], user[2], user[3], user[4],
-                        user[5], user[6], user[7], user[8]
-                    )
+                if user:
+                    # Check what fields are being selected
+                    if "user_id, username, password_hash, account_locked" in query:
+                        # Return data matching the login query order
+                        cursor.fetchone.return_value = (
+                            user[0], user[1], user[2], user[3], user[4],
+                            user[5], user[6], user[7], user[8]
+                        )
+                    elif "SELECT *" in query.upper() or ("*" in query and "FROM" in query.upper()):
+                        # SELECT * FROM users - return all fields in stored order
+                        # This handles the registration check query
+                        cursor.fetchone.return_value = user
+                    else:
+                        # Other SELECT queries - return user tuple
+                        cursor.fetchone.return_value = user
                 else:
-                    cursor.fetchone.return_value = user
+                    # User not found - important for registration checks
+                    cursor.fetchone.return_value = None
             elif params and "user_id = ?" in query:
                 user_id = params[0]
                 # Find user by user_id
@@ -203,13 +216,16 @@ def mock_database():
     return db
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def auth_module(mock_database):
     """
     Fixture providing an initialized AuthModule instance.
     
     Uses the mock_database fixture and initializes AuthModule with
     default password policy and TOTP settings.
+    
+    Note: This fixture is function-scoped to ensure each test gets a fresh
+    AuthModule instance with a fresh database connection.
     """
     return AuthModule(
         db=mock_database,
