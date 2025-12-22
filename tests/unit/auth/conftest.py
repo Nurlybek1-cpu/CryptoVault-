@@ -14,15 +14,17 @@ from datetime import datetime
 from src.auth.auth_module import AuthModule
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def test_username():
     """
     Fixture providing a unique test username for each test.
     
     Uses a UUID to ensure each test gets a unique username, preventing
-    conflicts between tests that register users.
+    conflicts between tests that register users. This fixture is explicitly
+    function-scoped to ensure a new username is generated for each test.
     """
     # Generate a unique username using UUID (first 8 chars for readability)
+    # This ensures each test gets a completely unique username
     unique_id = str(uuid.uuid4())[:8]
     return f"testuser_{unique_id}"
 
@@ -54,29 +56,40 @@ def mock_database():
     """
     db = MagicMock()
     
-    # Mock data storage - fresh for each test
+    # Mock data storage - store directly on db object for better isolation
     # Create new dict instances to ensure no shared state
-    users_data = {}
-    sessions_data = {}
+    # This ensures each test gets completely isolated data structures
+    db._users_data = dict()
+    db._sessions_data = dict()
+    
+    # Add a unique identifier to verify fixture isolation (for debugging)
+    db._fixture_id = str(uuid.uuid4())[:8]
     
     def mock_execute(query, params=None):
         """Mock execute method that simulates database operations."""
         cursor = MagicMock()
         
+        # Access data from db object to ensure we're using the right instance
+        users_data = db._users_data
+        sessions_data = db._sessions_data
+        
         # Handle user queries
-        if "SELECT" in query.upper() and "users" in query.upper():
-            if params and "username = ?" in query:
+        # Normalize query by removing extra whitespace/newlines for matching
+        query_normalized = " ".join(query.split())
+        
+        if "SELECT" in query_normalized.upper() and "users" in query_normalized.upper():
+            if params and "username = ?" in query_normalized:
                 username = params[0]
                 user = users_data.get(username)
                 if user:
                     # Check what fields are being selected
-                    if "user_id, username, password_hash, account_locked" in query:
+                    if "user_id, username, password_hash, account_locked" in query_normalized:
                         # Return data matching the login query order
                         cursor.fetchone.return_value = (
                             user[0], user[1], user[2], user[3], user[4],
                             user[5], user[6], user[7], user[8]
                         )
-                    elif "SELECT *" in query.upper() or ("*" in query and "FROM" in query.upper()):
+                    elif "SELECT *" in query_normalized.upper() or ("*" in query_normalized and "FROM" in query_normalized.upper()):
                         # SELECT * FROM users - return all fields in stored order
                         # This handles the registration check query
                         cursor.fetchone.return_value = user
@@ -84,7 +97,7 @@ def mock_database():
                         # Other SELECT queries - return user tuple
                         cursor.fetchone.return_value = user
                 else:
-                    # User not found - important for registration checks
+                    # User not found - return None (important for both registration checks and login)
                     cursor.fetchone.return_value = None
             elif params and "user_id = ?" in query:
                 user_id = params[0]
@@ -212,23 +225,28 @@ def mock_database():
                     if "is_valid = ?" in query:
                         session_data[6] = params[0]
                     sessions_data[session_token] = tuple(session_data)
+        else:
+            # Unmatched query - return None for safety
+            # This handles any queries we don't explicitly handle
+            cursor.fetchone.return_value = None
         
         return cursor
     
     db.execute = mock_execute
     db.commit = MagicMock()
     
-    # Store data references for test access
-    db._users_data = users_data
-    db._sessions_data = sessions_data
+    # Ensure database is empty at start (defensive check)
+    # Clear any existing data to ensure clean state
+    db._users_data.clear()
+    db._sessions_data.clear()
     
     # Yield the database instance
     yield db
     
     # Cleanup: clear data after test (defensive programming)
     # This ensures no data persists between tests even if there are any issues
-    users_data.clear()
-    sessions_data.clear()
+    db._users_data.clear()
+    db._sessions_data.clear()
 
 
 @pytest.fixture(scope="function")
