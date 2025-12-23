@@ -10,8 +10,8 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 
-from block import Block
-from merkle_tree import MerkleTree
+from src.blockchain.block import Block
+from src.blockchain.merkle_tree import MerkleTree
 from exceptions import (
     BlockchainError, BlockValidationError, TransactionError,
     ChainReorganizationError, AuditTrailError, ProofOfWorkError
@@ -75,6 +75,9 @@ class BlockchainModule:
             f"BlockchainModule initialized with difficulty={difficulty}, "
             f"nonce_range={nonce_range}"
         )
+
+        # Initialize chain with genesis block
+        self.genesis_block: Block = self.create_genesis_block()
     
     @staticmethod
     def _setup_logger() -> logging.Logger:
@@ -94,33 +97,30 @@ class BlockchainModule:
             logger.addHandler(handler)
             logger.setLevel(logging.INFO)
         return logger
-    
+
     def create_genesis_block(self) -> Block:
         """
-        Create genesis block (first block in chain).
-        
-        Genesis block has index 0, empty previous hash, and empty Merkle root.
-        Must be mined before adding to chain.
-        
-        Returns:
-            Block: Genesis block
+        Create and mine the genesis block (index 0).
         """
+        if self.chain:
+            return self.chain[0]
+
+        previous_hash = "0" * 64
+        merkle_root = hashlib.sha256(b"").hexdigest()
+
         genesis_block = Block(
             index=0,
-            previous_hash=b'\x00' * 32,
-            merkle_root=b'\x00' * 32,
-            difficulty=self.difficulty
+            transactions=[],
+            previous_hash=previous_hash,
+            merkle_root=merkle_root,
+            difficulty=self.difficulty,
         )
-        
-        # Mine genesis block
-        try:
-            genesis_block.mine()
-            self.chain.append(genesis_block)
-            self.logger.info(f"Genesis block created: {genesis_block.hash.hex()[:16]}...")
-            return genesis_block
-        except ProofOfWorkError as e:
-            self.logger.error(f"Failed to mine genesis block: {e}")
-            raise BlockchainError(f"Genesis block mining failed: {e}")
+        genesis_block.mine()
+        self.chain.append(genesis_block)
+        self.logger.info(
+            "Genesis block created: %s", genesis_block.hash[:16]
+        )
+        return genesis_block
     
     def add_transaction(self, transaction_dict: Dict[str, Any]) -> bool:
         """
@@ -208,16 +208,16 @@ class BlockchainModule:
             previous_hash = self.chain[-1].hash
             index = len(self.chain)
         else:
-            previous_hash = b'\x00' * 32
+            previous_hash = "0" * 64
             index = 0
         
         # Create block
         block = Block(
             index=index,
+            transactions=transactions,
             previous_hash=previous_hash,
             merkle_root=merkle_root,
-            difficulty=self.difficulty,
-            transactions=transactions
+            difficulty=self.difficulty
         )
         
         self.logger.info(
@@ -258,15 +258,15 @@ class BlockchainModule:
             # Create block
             block = Block(
                 index=index,
+                transactions=self.pending_transactions,
                 previous_hash=previous_hash,
                 merkle_root=merkle_root,
                 difficulty=self.difficulty,
-                transactions=self.pending_transactions
             )
             
             # Mine block
             start_time = time.time()
-            nonce, hash_value = block.mine()
+            hash_value = block.mine()
             elapsed = time.time() - start_time
             
             # Validate before adding
@@ -280,7 +280,7 @@ class BlockchainModule:
             
             self.logger.info(
                 f"Block {block.index} mined successfully in {elapsed:.2f}s "
-                f"with nonce={nonce}, hash={hash_value.hex()[:16]}..., "
+                f"with nonce={block.nonce}, hash={hash_value[:16]}..., "
                 f"cleared {cleared_txs} transactions"
             )
             
@@ -321,8 +321,8 @@ class BlockchainModule:
             calculated_hash = block.calculate_hash()
             if calculated_hash != block.hash:
                 raise BlockValidationError(
-                    f"Block hash mismatch: {calculated_hash.hex()[:16]}... != "
-                    f"{block.hash.hex()[:16]}..."
+                    f"Block hash mismatch: {calculated_hash[:16]}... != "
+                    f"{(block.hash or '')[:16]}..."
                 )
             
             # Check Proof of Work
@@ -433,115 +433,42 @@ class BlockchainModule:
         """
         return len(self.chain)
     
-    def build_merkle_tree(self, transactions: List[Dict[str, Any]]) -> bytes:
+    def build_merkle_tree(self, transactions: List[Dict[str, Any]]) -> str:
         """
         Build Merkle tree from transactions and return root hash.
-        
-        Creates Merkle tree from transaction data for efficient verification.
-        
-        Args:
-            transactions: List of transaction dictionaries
-        
-        Returns:
-            bytes: Merkle root hash
-        
-        Raises:
-            BlockchainError: If transaction list is empty or invalid
         """
         if not transactions:
             raise BlockchainError("Cannot build Merkle tree from empty transactions")
-        
-        # Convert transactions to hashes
-        tx_hashes = []
-        for tx in transactions:
-            # Serialize transaction and hash it
-            tx_json = json.dumps(tx, sort_keys=True, default=str)
-            tx_hash = hashlib.sha256(tx_json.encode()).digest()
-            tx_hashes.append(tx_hash)
-        
-        # Build Merkle tree
+
         try:
-            merkle_tree = MerkleTree(tx_hashes)
-            return merkle_tree.get_root()
+            merkle_tree = MerkleTree(transactions)
+            root = merkle_tree.get_root()
+            if root is None:
+                raise BlockchainError("Merkle tree construction failed: empty root")
+            return root
         except Exception as e:
             raise BlockchainError(f"Merkle tree construction failed: {e}")
-    
-    def get_merkle_proof(self, transaction_hash: str) -> List[str]:
+
+    def get_merkle_proof(self, transaction_hash: str, block_index: int) -> List[tuple]:
         """
-        Get Merkle proof for a transaction.
-        
-        Finds transaction hash in latest block and returns proof path.
-        
-        Args:
-            transaction_hash: Hex string of transaction hash to prove
-        
-        Returns:
-            List[str]: Merkle proof path (hex strings)
-        
-        Raises:
-            BlockchainError: If transaction not found
+        Get Merkle proof for a transaction in a specific block.
         """
-        if not self.chain:
-            raise BlockchainError("Blockchain is empty")
-        
-        # Get latest block
-        latest_block = self.chain[-1]
-        
-        # Find transaction index
-        tx_index = -1
-        for i, tx in enumerate(latest_block.transactions):
-            tx_json = json.dumps(tx, sort_keys=True, default=str)
-            tx_hash = hashlib.sha256(tx_json.encode()).digest()
-            if tx_hash.hex() == transaction_hash:
-                tx_index = i
-                break
-        
-        if tx_index == -1:
-            raise BlockchainError(f"Transaction {transaction_hash} not found in latest block")
-        
-        # Rebuild Merkle tree and get proof
-        tx_hashes = []
-        for tx in latest_block.transactions:
-            tx_json = json.dumps(tx, sort_keys=True, default=str)
-            tx_hash = hashlib.sha256(tx_json.encode()).digest()
-            tx_hashes.append(tx_hash)
-        
-        merkle_tree = MerkleTree(tx_hashes)
-        proof = merkle_tree.get_proof(tx_index)
-        
-        return [h.hex() for h in proof]
-    
+        block = self.get_block(block_index)
+        tree = MerkleTree(block["transactions"])
+        return tree.get_proof(transaction_hash)
+
     def verify_merkle_proof(
         self,
         transaction_hash: str,
-        proof: List[str],
+        proof: List[tuple],
         merkle_root: str,
-        tx_index: int
     ) -> bool:
         """
         Verify Merkle proof for a transaction.
-        
-        Args:
-            transaction_hash: Hex string of transaction hash
-            proof: List of proof hashes (hex strings)
-            merkle_root: Expected Merkle root (hex string)
-            tx_index: Original transaction index
-        
-        Returns:
-            bool: True if proof is valid
         """
         try:
-            leaf_hash = bytes.fromhex(transaction_hash)
-            proof_bytes = [bytes.fromhex(h) for h in proof]
-            root_hash = bytes.fromhex(merkle_root)
-            
-            merkle_tree = MerkleTree()
-            return merkle_tree.verify_proof(
-                leaf_hash,
-                proof_bytes,
-                tx_index,
-                root_hash
-            )
+            temp_tree = MerkleTree([])
+            return temp_tree.verify_proof(transaction_hash, proof, merkle_root)
         except Exception as e:
             self.logger.warning(f"Merkle proof verification failed: {e}")
             return False
