@@ -18,7 +18,7 @@ import time
 import hashlib
 import pyotp  # type: ignore
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 from src.auth.auth_module import AuthModule
 from src.auth.password_validator import PasswordValidator
@@ -913,7 +913,7 @@ class TestAccountLockout:
         lockout_until = user_record[0]
         
         assert lockout_until is not None
-        assert lockout_until > datetime.utcnow()
+        assert lockout_until > datetime.now(UTC)
     
     def test_lockout_auto_unlock(self, auth_module, test_username, test_password, mock_database):
         """Test that expired lockouts are automatically unlocked.
