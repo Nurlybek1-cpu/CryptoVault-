@@ -260,7 +260,7 @@ class AuthModule:
             user_id = str(uuid.uuid4())
             
             # Get current timestamp
-            created_at = datetime.utcnow()
+            created_at = datetime.now(UTC)
             
             try:
                 # Insert user record into database
@@ -423,7 +423,7 @@ class AuthModule:
                     failed_attempts, totp_enabled, totp_secret, backup_codes_hash = user_record
                 
                 # Check lockout expiry and account lock status
-                current_time = datetime.utcnow()
+                current_time = datetime.now(UTC)
                 self.check_lock_expiry(user_id)
                 is_locked, lock_reason = self.is_account_locked(user_id)
                 
@@ -951,7 +951,7 @@ class AuthModule:
             raise AuthenticationError(error_msg, error_code="DATABASE_ERROR")
         
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(UTC)
             lockout_until = current_time + timedelta(minutes=minutes)
             lock_reason = "Too many failed login attempts"
             
@@ -1082,7 +1082,7 @@ class AuthModule:
                 return False, ""
             
             # Check if lockout period has expired
-            current_time = datetime.utcnow()
+            current_time = datetime.now(UTC)
             if account_locked_until and account_locked_until > current_time:
                 # Account is still locked
                 lockout_until_str = account_locked_until.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1132,7 +1132,7 @@ class AuthModule:
                 return
             
             # Check if lockout period has expired
-            current_time = datetime.utcnow()
+            current_time = datetime.now(UTC)
             if account_locked_until and account_locked_until <= current_time:
                 # Lockout expired - unlock account
                 self.unlock_user(user_id)
