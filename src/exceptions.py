@@ -18,7 +18,7 @@ class AuthenticationError(Exception):
         message: Human-readable error message
         error_code: Optional error code for programmatic handling
     """
-    
+
     def __init__(self, message: str, error_code: str | None = None) -> None:
         """
         Initialize AuthenticationError.
@@ -44,12 +44,12 @@ class RegistrationError(AuthenticationError):
         error_code: Optional error code for programmatic handling
         field: Optional field name that caused the error
     """
-    
+
     def __init__(
-        self,
-        message: str,
-        error_code: str | None = None,
-        field: str | None = None
+            self,
+            message: str,
+            error_code: str | None = None,
+            field: str | None = None
     ) -> None:
         """
         Initialize RegistrationError.
@@ -76,12 +76,12 @@ class PasswordStrengthError(AuthenticationError):
         error_code: Optional error code for error categorization
         failed_checks: List of validation checks that failed
     """
-    
+
     def __init__(
-        self,
-        message: str,
-        error_code: str | None = None,
-        failed_checks: list[str] | None = None
+            self,
+            message: str,
+            error_code: str | None = None,
+            failed_checks: list[str] | None = None
     ) -> None:
         """
         Initialize PasswordStrengthError.
@@ -107,12 +107,12 @@ class TOTPError(AuthenticationError):
         error_code: Optional error code for programmatic handling
         remaining_attempts: Optional number of remaining verification attempts
     """
-    
+
     def __init__(
-        self,
-        message: str,
-        error_code: str | None = None,
-        remaining_attempts: int | None = None
+            self,
+            message: str,
+            error_code: str | None = None,
+            remaining_attempts: int | None = None
     ) -> None:
         """
         Initialize TOTPError.
@@ -138,12 +138,12 @@ class SessionError(AuthenticationError):
         error_code: Optional error code for programmatic handling
         session_id: Optional session identifier related to the error
     """
-    
+
     def __init__(
-        self,
-        message: str,
-        error_code: str | None = None,
-        session_id: str | None = None
+            self,
+            message: str,
+            error_code: str | None = None,
+            session_id: str | None = None
     ) -> None:
         """
         Initialize SessionError.
@@ -171,13 +171,13 @@ class AccountLockedError(AuthenticationError):
         lockout_until: Optional timestamp when the account will be unlocked
         reason: Optional reason for the account lockout
     """
-    
+
     def __init__(
-        self,
-        message: str,
-        error_code: str | None = None,
-        lockout_until: float | None = None,
-        reason: str | None = None
+            self,
+            message: str,
+            error_code: str | None = None,
+            lockout_until: float | None = None,
+            reason: str | None = None
     ) -> None:
         """
         Initialize AccountLockedError.
@@ -207,13 +207,13 @@ class RateLimitError(AuthenticationError):
         retry_after: Optional seconds to wait before retrying
         limit: Optional rate limit that was exceeded
     """
-    
+
     def __init__(
-        self,
-        message: str,
-        error_code: str | None = None,
-        retry_after: float | None = None,
-        limit: int | None = None
+            self,
+            message: str,
+            error_code: str | None = None,
+            retry_after: float | None = None,
+            limit: int | None = None
     ) -> None:
         """
         Initialize RateLimitError.
@@ -241,12 +241,12 @@ class PasswordResetError(AuthenticationError):
         error_code: Optional error code for programmatic handling
         token_id: Optional reset token identifier related to the error
     """
-    
+
     def __init__(
-        self,
-        message: str,
-        error_code: str | None = None,
-        token_id: str | None = None
+            self,
+            message: str,
+            error_code: str | None = None,
+            token_id: str | None = None
     ) -> None:
         """
         Initialize PasswordResetError.
@@ -259,3 +259,34 @@ class PasswordResetError(AuthenticationError):
         super().__init__(message, error_code)
         self.token_id = token_id
 
+
+# Start Module 2
+class MessagingError(Exception):
+    """Base class for messaging exceptions."""
+    pass
+
+
+class KeyExchangeError(MessagingError):
+    """Raised when ECDH key exchange fails."""
+    pass
+
+
+class EncryptionError(MessagingError):
+    """Raised when message encryption/decryption fails."""
+    pass
+
+
+class SignatureError(MessagingError):
+    """Raised when signing a message fails."""
+    pass
+
+
+class MessageVerificationError(MessagingError):
+    """Raised when message signature verification fails."""
+    pass
+
+
+class GroupMessagingError(MessagingError):
+    """Raised when group messaging operations fail."""
+    pass
+# End Module 2
