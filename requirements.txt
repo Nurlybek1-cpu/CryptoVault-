@@ -1,0 +1,6 @@
+# Core Cryptography Library
+cryptography>=41.0.0
+
+# Testing (Optional, but good practice to include)
+pytest>=7.0.0
+coverage>=7.0.0
