@@ -4,6 +4,7 @@ import json
 from typing import Dict, List, Optional, Union
 from datetime import datetime
 from cryptography.hazmat.primitives import serialization
+from datetime import datetime, timezone  # <--- Добавьте timezone
 
 from src.exceptions import (
     MessagingError, KeyExchangeError, EncryptionError,
@@ -109,7 +110,7 @@ class MessagingModule:
                 "header": {
                     "sender_id": self.user_id,
                     "recipient_id": recipient_id,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "algorithm": "ECDH-P256-AES256GCM-ECDSA"
                 },
                 "ephemeral_public_key": base64.b64encode(eph_public_bytes).decode('utf-8'),

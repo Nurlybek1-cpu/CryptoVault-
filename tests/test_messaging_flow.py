@@ -69,7 +69,7 @@ def test_secure_chat():
 
         # 5. Validation
         if decrypted_data['content'] == message_text:
-            print("\n--- 🎉 TEST PASSED SUCCESSFULLY! ---")
+            print("\n--- TEST PASSED SUCCESSFULLY! ---")
             print("End-to-End Encryption (E2EE) verified.")
         else:
             print("\n--- ❌ ERROR: Content mismatch! ---")

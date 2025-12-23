@@ -1,11 +1,10 @@
 import sys
 import os
-import json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
+from src.messaging.messaging_module import MessagingModule
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.messaging.messaging_module import MessagingModule
 
 
 def get_keys():
@@ -54,7 +53,7 @@ def test_groups():
     print(f"📩 Alice reads: '{decrypted_group_msg['content']}'")
 
     if decrypted_group_msg['content'] == msg_text:
-        print("\n--- 🎉 BONUS ACHIEVED! (10/10) ---")
+        print("\n--- TEST PASSED SUCCESSFULLY! ---")
 
 
 if __name__ == "__main__":
