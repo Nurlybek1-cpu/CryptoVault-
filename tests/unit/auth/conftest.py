@@ -76,41 +76,40 @@ def mock_database():
         # Handle user queries
         # Normalize query by removing extra whitespace/newlines for matching
         query_normalized = " ".join(query.split())
+        query_upper = query_normalized.upper()
         
-        if "SELECT" in query_normalized.upper() and "users" in query_normalized.upper():
-            if params and "username = ?" in query_normalized:
+        if "SELECT" in query_upper and "USERS" in query_upper:
+            if params and "USERNAME = ?" in query_upper:
                 username = params[0]
                 user = users_data.get(username)
                 if user:
-                    # Check what fields are being selected
-                    if "user_id, username, password_hash, account_locked" in query_normalized:
-                        # Return data matching the login query order
+                    if "USER_ID, USERNAME, PASSWORD_HASH, ACCOUNT_LOCKED" in query_upper:
                         cursor.fetchone.return_value = (
                             user[0], user[1], user[2], user[3], user[4],
                             user[5], user[6], user[7], user[8]
                         )
-                    elif "SELECT *" in query_normalized.upper() or ("*" in query_normalized and "FROM" in query_normalized.upper()):
-                        # SELECT * FROM users - return all fields in stored order
-                        # This handles the registration check query
+                    elif "SELECT *" in query_upper or ("*" in query_normalized and "FROM" in query_upper):
                         cursor.fetchone.return_value = user
+                    elif "BACKUP_CODES_HASH" in query_upper and "SELECT BACKUP_CODES_HASH" in query_upper:
+                        cursor.fetchone.return_value = user
+                    elif "FAILED_LOGIN_ATTEMPTS" in query_upper:
+                        cursor.fetchone.return_value = user
+                    elif "TOTP_SECRET" in query_upper and "TOTP_ENABLED" in query_upper and "SELECT TOTP_SECRET" in query_upper:
+                        cursor.fetchone.return_value = (user[7], user[6])
                     else:
-                        # Other SELECT queries - return user tuple
                         cursor.fetchone.return_value = user
                 else:
-                    # User not found - return None (important for both registration checks and login)
                     cursor.fetchone.return_value = None
-            elif params and "user_id = ?" in query:
+            elif params and "USER_ID = ?" in query_upper:
                 user_id = params[0]
-                # Find user by user_id
                 user = next((u for u in users_data.values() if u[0] == user_id), None)
                 if user:
-                    # Handle different SELECT queries
-                    if "failed_login_attempts" in query and "FROM users" in query:
-                        # Return just the failed_login_attempts value
-                        cursor.fetchone.return_value = (user[5],)  # failed_login_attempts is at index 5
-                    elif "account_locked, account_locked_until" in query:
-                        # Return account lock fields
-                        cursor.fetchone.return_value = (user[3], user[4])  # account_locked, account_locked_until
+                    if "ACCOUNT_LOCKED, ACCOUNT_LOCKED_UNTIL" in query_upper:
+                        cursor.fetchone.return_value = (user[3], user[4])
+                    elif "ACCOUNT_LOCKED_UNTIL" in query_upper:
+                        cursor.fetchone.return_value = (user[4],)
+                    elif "FAILED_LOGIN_ATTEMPTS" in query_upper:
+                        cursor.fetchone.return_value = (user[5],)
                     else:
                         cursor.fetchone.return_value = user
                 else:
@@ -119,7 +118,7 @@ def mock_database():
                 cursor.fetchone.return_value = None
         
         # Handle session queries
-        elif "SELECT" in query.upper() and "sessions" in query.upper():
+        elif "SELECT" in query.upper() and "SESSIONS" in query.upper():
             if params and "session_token = ?" in query:
                 token = params[0]
                 session = sessions_data.get(token)
@@ -128,7 +127,7 @@ def mock_database():
                 cursor.fetchone.return_value = None
         
         # Handle INSERT operations
-        elif "INSERT" in query.upper() and "users" in query.upper():
+        elif "INSERT" in query.upper() and "USERS" in query.upper():
             if params:
                 # INSERT order: user_id, username, password_hash, totp_secret, totp_enabled,
                 #               backup_codes_hash, failed_login_attempts, account_locked,
@@ -154,7 +153,7 @@ def mock_database():
                     failed_login_attempts, totp_enabled, totp_secret, backup_codes_hash
                 )
         
-        elif "INSERT" in query.upper() and "sessions" in query.upper():
+        elif "INSERT" in query.upper() and "SESSIONS" in query.upper():
             if params:
                 session_token = params[0]
                 user_id = params[1]
@@ -169,7 +168,7 @@ def mock_database():
                 )
         
         # Handle UPDATE operations
-        elif "UPDATE" in query.upper() and "users" in query.upper():
+        elif "UPDATE" in query.upper() and "USERS" in query.upper():
             if params:
                 # Find user by username or user_id based on WHERE clause
                 if "username = ?" in query:
@@ -210,14 +209,16 @@ def mock_database():
                                 user_data_list[3] = params[0]  # account_locked
                                 if len(params) > 1:
                                     user_data_list[4] = params[1]  # account_locked_until
-                                if len(params) > 3:
-                                    user_data_list[5] = params[3]  # failed_login_attempts
                             elif "failed_login_attempts = ?" in query:
                                 user_data_list[5] = params[0]
+                            elif "totp_enabled = ?" in query:
+                                user_data_list[6] = params[0]
+                                if len(params) > 1:
+                                    user_data_list[7] = params[1]
                             users_data[username] = tuple(user_data_list)
                             break
         
-        elif "UPDATE" in query.upper() and "sessions" in query.upper():
+        elif "UPDATE" in query.upper() and "SESSIONS" in query.upper():
             if params:
                 session_token = params[-1] if "session_token = ?" in query else None
                 if session_token and session_token in sessions_data:
