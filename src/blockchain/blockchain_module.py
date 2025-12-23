@@ -12,6 +12,8 @@ from collections import defaultdict
 
 from src.blockchain.block import Block
 from src.blockchain.merkle_tree import MerkleTree
+from src.blockchain.proof_of_work import ProofOfWork
+from src.blockchain.chain_validator import ChainValidator
 from exceptions import (
     BlockchainError, BlockValidationError, TransactionError,
     ChainReorganizationError, AuditTrailError, ProofOfWorkError
@@ -65,8 +67,10 @@ class BlockchainModule:
         self.pending_transactions: List[Dict[str, Any]] = []
         self.difficulty: int = difficulty
         self.nonce_range: Tuple[int, int] = nonce_range
-        self.validator = validator
+        self.tx_validator = validator
+        self.validator = ChainValidator()
         self.logger: logging.Logger = logger or self._setup_logger()
+        self.pow = ProofOfWork()
         
         # Audit trail: entity_type -> entity_id -> list of transactions
         self.audit_trail: Dict[str, Dict[str, List[Dict]]] = defaultdict(lambda: defaultdict(list))
@@ -115,7 +119,7 @@ class BlockchainModule:
             merkle_root=merkle_root,
             difficulty=self.difficulty,
         )
-        genesis_block.mine()
+        self.pow.mine_block(genesis_block)
         self.chain.append(genesis_block)
         self.logger.info(
             "Genesis block created: %s", genesis_block.hash[:16]
@@ -266,7 +270,7 @@ class BlockchainModule:
             
             # Mine block
             start_time = time.time()
-            hash_value = block.mine()
+            mining_result = self.pow.mine_block(block)
             elapsed = time.time() - start_time
             
             # Validate before adding
@@ -280,9 +284,15 @@ class BlockchainModule:
             
             self.logger.info(
                 f"Block {block.index} mined successfully in {elapsed:.2f}s "
-                f"with nonce={block.nonce}, hash={hash_value[:16]}..., "
+                f"with nonce={block.nonce}, hash={(block.hash or '')[:16]}..., "
                 f"cleared {cleared_txs} transactions"
             )
+
+            # Adjust difficulty based on recent blocks
+            try:
+                self.difficulty = self.pow.adjust_difficulty(self.chain)
+            except Exception as e:
+                self.logger.warning(f"Difficulty adjustment failed: {e}")
             
             return block.to_dict()
         
@@ -292,108 +302,84 @@ class BlockchainModule:
     
     def validate_block(self, block: Block) -> bool:
         """
-        Validate block structure and Proof of Work.
-        
-        Checks:
-        - Block has valid structure
-        - Proof of Work is valid
-        - Hash is correctly calculated
-        - Merkle tree is valid
-        
-        Args:
-            block: Block to validate
-        
-        Returns:
-            bool: True if block is valid
-        
-        Raises:
-            BlockValidationError: If validation fails with details
+        Validate a single block using chain validator and Merkle root check.
         """
         try:
-            # Check block structure
             if not isinstance(block, Block):
                 raise BlockValidationError("Invalid block type")
-            
+
             if block.index < 0:
                 raise BlockValidationError("Block index cannot be negative")
-            
-            # Check hash calculation
-            calculated_hash = block.calculate_hash()
-            if calculated_hash != block.hash:
-                raise BlockValidationError(
-                    f"Block hash mismatch: {calculated_hash[:16]}... != "
-                    f"{(block.hash or '')[:16]}..."
-                )
-            
-            # Check Proof of Work
-            if not block.validate_pow():
-                raise BlockValidationError(
-                    f"Invalid Proof of Work for difficulty {block.difficulty}"
-                )
-            
-            # Validate Merkle tree if transactions present
+
+            # Validate against previous block if exists
+            if block.index > 0 and len(self.chain) >= block.index:
+                previous_block = self.chain[block.index - 1]
+                if not self.validator.validate_block(block, previous_block):
+                    raise BlockValidationError("Block failed structural validation")
+            elif block.index == 0 and block.previous_hash != "0" * 64:
+                raise BlockValidationError("Invalid genesis previous hash")
+
+            # Validate Merkle root if transactions present
             if block.transactions:
                 calculated_merkle = self.build_merkle_tree(block.transactions)
                 if calculated_merkle != block.merkle_root:
                     raise BlockValidationError("Merkle root mismatch")
-            
+
             self.logger.debug(f"Block {block.index} validation passed")
             return True
-        
+
         except BlockValidationError as e:
             self.logger.warning(f"Block {block.index} validation failed: {e}")
             return False
     
     def validate_chain(self) -> bool:
         """
-        Validate entire blockchain.
-        
-        Checks:
-        - Each block is valid
-        - Previous hash links match
-        - Chain continuity
-        
-        Returns:
-            bool: True if entire chain is valid
+        Validate entire blockchain using the ChainValidator.
         """
         try:
             if not self.chain:
-                self.logger.info("Empty chain is valid")
-                return True
-            
-            # Validate genesis block
-            if not self.validate_block(self.chain[0]):
-                raise BlockValidationError("Genesis block is invalid")
-            
-            # Validate subsequent blocks
-            for i in range(1, len(self.chain)):
-                current_block = self.chain[i]
-                previous_block = self.chain[i - 1]
-                
-                # Validate block
-                if not self.validate_block(current_block):
-                    raise BlockValidationError(f"Block {i} is invalid")
-                
-                # Check previous hash link
-                if current_block.previous_hash != previous_block.hash:
-                    raise BlockValidationError(
-                        f"Block {i} previous hash does not match block {i-1} hash"
-                    )
-                
-                # Check index continuity
-                if current_block.index != i:
-                    raise BlockValidationError(
-                        f"Block {i} has incorrect index: {current_block.index}"
-                    )
-            
+                return False
+
+            if not self.validator.validate_chain(self.chain):
+                raise BlockValidationError("Chain validation failed")
+
             self.logger.info(
                 f"Chain validation passed for {len(self.chain)} blocks"
             )
             return True
-        
+
         except BlockValidationError as e:
             self.logger.error(f"Chain validation failed: {e}")
             return False
+
+    def is_chain_valid(self) -> Dict[str, Any]:
+        """
+        Return detailed chain validation result.
+        """
+        errors: List[str] = []
+        if not self.chain:
+            return {"valid": False, "blocks_validated": 0, "errors": ["Empty chain"]}
+
+        # Check genesis
+        genesis = self.chain[0]
+        if genesis.index != 0:
+            errors.append("Genesis index is not 0")
+        if genesis.previous_hash != "0" * 64:
+            errors.append("Genesis previous hash incorrect")
+
+        blocks_validated = 0
+        for i in range(1, len(self.chain)):
+            current_block = self.chain[i]
+            previous_block = self.chain[i - 1]
+            if not self.validator.validate_block(current_block, previous_block):
+                errors.append(f"Block {i} failed validation")
+            blocks_validated += 1
+
+        return {
+            "valid": len(errors) == 0,
+            "blocks_validated": blocks_validated,
+            "errors": errors,
+        }
     
     def get_block(self, index: int) -> Dict[str, Any]:
         """
@@ -485,14 +471,14 @@ class BlockchainModule:
         Returns:
             bool: True if signature is valid or no validator available
         """
-        if not self.validator:
+        if not self.tx_validator:
             return True
         
         if 'signature' not in transaction:
             return False
         
         try:
-            return self.validator.verify_signature(transaction)
+            return self.tx_validator.verify_signature(transaction)
         except Exception as e:
             self.logger.warning(
                 f"Transaction {transaction.get('id')} signature verification failed: {e}"
