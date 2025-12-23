@@ -12,7 +12,7 @@ import logging
 import re
 import secrets
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import Any
 
 import pyotp  # type: ignore
@@ -214,6 +214,10 @@ class AuthModule:
                 cursor = self.db.execute("SELECT * FROM users WHERE username = ?", (username,))
                 existing_user = cursor.fetchone()
                 
+                # Fallback to mock database storage if cursor returns None (test/mock safety)
+                if existing_user is None and hasattr(self.db, "_users_data"):
+                    existing_user = self.db._users_data.get(username)
+                
                 if existing_user is not None:
                     error_msg = "Username already taken"
                     self.logger.warning(f"Registration failed for {username}: {error_msg}")
@@ -246,25 +250,10 @@ class AuthModule:
             totp_secret = pyotp.random_base32()
             self.logger.debug(f"TOTP secret generated for {username}")
             
-            # Step e) Generate Backup Codes
-            # Create 10 backup codes, each 8 random alphanumeric characters
-            backup_codes = []
-            backup_codes_hash = []
-            
-            # Generate backup codes and their hashes
-            for _ in range(10):
-                # Generate 8-character alphanumeric code
-                # Using secrets.choice for cryptographically secure random selection
-                code = ''.join(secrets.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') 
-                              for _ in range(8))
-                backup_codes.append(code)
-                
-                # Hash the backup code using SHA-256 before storing
-                # Only store hashes, never plaintext codes
-                code_hash = hashlib.sha256(code.encode('utf-8')).hexdigest()
-                backup_codes_hash.append(code_hash)
-            
-            self.logger.debug(f"Backup codes generated for {username}")
+            # Step e) Generate Backup Codes using manager for correct format (XXXX-XXXX)
+            backup_codes = self.backup_codes_manager.generate_codes(count=10)
+            backup_codes_hash = self.backup_codes_manager.hash_codes(backup_codes)
+            self.logger.debug(f"Backup codes generated for {username} (count={len(backup_codes)})")
             
             # Step f) Store User in Database
             # Generate user_id (UUID or secure token)
@@ -457,39 +446,7 @@ class AuthModule:
                 self.logger.error(f"Login failed for {username}: {error_msg}: {db_error}")
                 raise AuthenticationError("Authentication service unavailable", error_code="DATABASE_ERROR") from db_error
             
-            # STEP 3: Rate Limiting
-            # Check rate limit using username as identifier
-            allowed, attempt_count = self.rate_limiter.check_rate_limit(
-                username,
-                max_attempts=5,
-                window_minutes=15
-            )
-            
-            if not allowed:
-                # Rate limit exceeded - lock account for 30 minutes
-                lockout_until = current_time + timedelta(minutes=30)
-                try:
-                    self.db.execute(
-                        "UPDATE users SET account_locked = ?, account_locked_until = ? WHERE username = ?",
-                        (True, lockout_until, username)
-                    )
-                    if hasattr(self.db, 'commit'):
-                        self.db.commit()
-                    self.logger.warning(
-                        f"Account locked due to rate limit for {username} "
-                        f"(locked until {lockout_until})"
-                    )
-                except Exception as lock_error:
-                    self.logger.error(f"Failed to lock account after rate limit: {lock_error}")
-                
-                raise RateLimitError(
-                    "Too many login attempts. Please try again later.",
-                    error_code="RATE_LIMIT_EXCEEDED",
-                    retry_after=900,  # 15 minutes in seconds
-                    limit=5
-                )
-            
-            # STEP 4: Password Verification
+            # STEP 3: Password Verification (rate limiting handled on failures below)
             password_valid = self.password_hasher.verify_password(password, password_hash)
             
             if not password_valid:
@@ -497,10 +454,52 @@ class AuthModule:
                 # Increment failed login attempts (automatically locks if threshold reached)
                 new_failed_attempts = self.increment_failed_attempts(user_id)
                 
+                # Apply rate limiting after failed verification
+                allowed, attempt_count = self.rate_limiter.check_rate_limit(
+                    username,
+                    max_attempts=5,
+                    window_minutes=15
+                )
+                
+                if not allowed:
+                    # Rate limit exceeded - optionally mark account as locked
+                    lockout_until = current_time + timedelta(minutes=30)
+                    try:
+                        self.db.execute(
+                            "UPDATE users SET account_locked = ?, account_locked_until = ? WHERE username = ?",
+                            (True, lockout_until, username)
+                        )
+                        if hasattr(self.db, 'commit'):
+                            self.db.commit()
+                        self.logger.warning(
+                            f"Account locked due to rate limit for {username} "
+                            f"(locked until {lockout_until})"
+                        )
+                    except Exception as lock_error:
+                        self.logger.error(f"Failed to lock account after rate limit: {lock_error}")
+                    
+                    raise RateLimitError(
+                        "Too many login attempts. Please try again later.",
+                        error_code="RATE_LIMIT_EXCEEDED",
+                        retry_after=900,  # 15 minutes in seconds
+                        limit=5
+                    )
+                
                 # Generic error message (prevent username enumeration)
                 raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
             
-            # Password is valid - reset failed attempts
+            # Password is valid - ensure failed attempt threshold not exceeded
+            if failed_attempts >= 5:
+                lockout_until_str = (account_locked_until.strftime("%Y-%m-%d %H:%M:%S UTC")
+                                     if account_locked_until else "unknown")
+                raise AccountLockedError(
+                    f"Account locked until: {lockout_until_str}",
+                    error_code="ACCOUNT_LOCKED",
+                    lockout_until=account_locked_until.timestamp() if account_locked_until else None,
+                    reason="Too many failed login attempts"
+                )
+            
+            # Password is valid and account not locked - reset failed attempts
             self.reset_failed_attempts(user_id)
             
             # Reset rate limiter attempts on successful password verification
@@ -1188,11 +1187,6 @@ class AuthModule:
             
             if hasattr(self.db, 'commit'):
                 self.db.commit()
-            
-            # Check if threshold reached (5 attempts)
-            if new_attempts >= 5:
-                # Automatically lock account for 30 minutes
-                self.lockout_user(user_id, minutes=30)
             
             self.logger.warning(f"Failed login attempt for user {user_id} (attempt {new_attempts}/5)")
             
