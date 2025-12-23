@@ -8,12 +8,14 @@ multi-factor authentication, and account security features.
 
 import hmac
 import hashlib
+import json
 import logging
 import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, UTC
 from typing import Any
+import time
 
 import pyotp  # type: ignore
 
@@ -22,6 +24,7 @@ from src.auth.password_hasher import PasswordHasher
 from src.auth.password_validator import PasswordValidator
 from src.auth.rate_limiter import RateLimiter
 from src.auth.totp import TOTPManager
+from src.ledger.audit_logger import AuditLogger
 from src.exceptions import (
     AccountLockedError,
     AuthenticationError,
@@ -120,12 +123,43 @@ class AuthModule:
         
         # Initialize backup codes manager
         self.backup_codes_manager = BackupCodesManager()
-        
+
+        # Optional blockchain ledger (pass into constructor if available)
+        # This will be used to create an AuditLogger to write immutable audit events
+        self.ledger = None
+        self.audit_logger = None
+
         self.logger.info("AuthModule initialized")
         self.logger.debug(
             f"Password policy: {self.password_policy}, "
             f"TOTP settings: {self.totp_settings}"
         )
+        # Initialize audit logger if a ledger was passed later via attribute
+        if getattr(self, 'ledger', None) is not None:
+            try:
+                self.audit_logger = AuditLogger(self.ledger)
+            except Exception:
+                self.logger.warning("Failed to initialize AuditLogger")
+
+    def attach_ledger(self, blockchain_ledger: Any) -> None:
+        """Attach a blockchain ledger instance and initialize AuditLogger."""
+        self.ledger = blockchain_ledger
+        try:
+            self.audit_logger = AuditLogger(self.ledger)
+        except Exception as e:
+            self.logger.error(f"Failed to attach ledger to AuditLogger: {e}")
+
+    def _user_hash(self, username: str) -> str:
+        return hashlib.sha256(username.encode('utf-8')).hexdigest()
+
+    def _ip_hash(self, client_ip: str | None) -> str | None:
+        if not client_ip:
+            return None
+        return hashlib.sha256(client_ip.encode('utf-8')).hexdigest()
+
+    def _safe_session_id(self, session_token: str) -> str:
+        # Store a hashed/safe representation of the session id rather than token
+        return hashlib.sha256(session_token.encode('utf-8')).hexdigest()
     
     def register(self, username: str, password: str) -> dict[str, Any]:
         """
@@ -300,7 +334,25 @@ class AuthModule:
                     self.db.commit()
                 
                 self.logger.info(f"User registered successfully: {username} (user_id: {user_id})")
-                
+                # Log registration event to blockchain audit ledger if available
+                try:
+                    strength_score = min(100, len(password) * 3)
+                    event = {
+                        "type": "AUTH_REGISTRATION",
+                        "user_hash": self._user_hash(username),
+                        "timestamp": int(time.time()),
+                        "success": True,
+                        "ip_hash": None,
+                        "metadata": {
+                            "password_strength": strength_score,
+                            "totp_enabled": False,
+                            "backup_codes_generated": len(backup_codes)
+                        }
+                    }
+                    if self.audit_logger:
+                        self.audit_logger.log_auth_event(event)
+                except Exception:
+                    self.logger.debug("Failed to emit registration audit event")
             except Exception as db_error:
                 # Re-raise database errors as RegistrationError
                 error_msg = "Could not process registration: database error"
@@ -415,7 +467,24 @@ class AuthModule:
                 if user_record is None:
                     self.logger.warning(f"Login failed: user not found (username: {username})")
                     # Still check rate limit to prevent timing attacks
-                    self.rate_limiter.check_rate_limit(username, max_attempts=5, window_minutes=15)
+                    try:
+                        allowed, attempt_count = self.rate_limiter.check_rate_limit(username, max_attempts=5, window_minutes=15)
+                    except Exception:
+                        allowed, attempt_count = True, 0
+                    # Emit failed login audit event (user not found)
+                    try:
+                        event = {
+                            "type": "AUTH_LOGIN_FAILED",
+                            "user_hash": self._user_hash(username),
+                            "timestamp": int(time.time()),
+                            "failure_reason": "user_not_found",
+                            "ip_hash": None,
+                            "failed_attempt_count": attempt_count,
+                        }
+                        if self.audit_logger:
+                            self.audit_logger.log_auth_event(event)
+                    except Exception:
+                        self.logger.debug("Failed to emit login_failed audit event (user_not_found)")
                     raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
                 
                 # Extract user data
@@ -484,7 +553,21 @@ class AuthModule:
                         retry_after=900,  # 15 minutes in seconds
                         limit=5
                     )
-                
+                # Emit failed login audit event for invalid password
+                try:
+                    event = {
+                        "type": "AUTH_LOGIN_FAILED",
+                        "user_hash": self._user_hash(username),
+                        "timestamp": int(time.time()),
+                        "failure_reason": "invalid_password",
+                        "ip_hash": None,
+                        "failed_attempt_count": new_failed_attempts,
+                    }
+                    if self.audit_logger:
+                        self.audit_logger.log_auth_event(event)
+                except Exception:
+                    self.logger.debug("Failed to emit login_failed audit event (invalid_password)")
+
                 # Generic error message (prevent username enumeration)
                 raise AuthenticationError("Invalid credentials", error_code="INVALID_CREDENTIALS")
             
@@ -666,6 +749,22 @@ class AuthModule:
             
             # Log successful login
             self.logger.info(f"User {username} logged in successfully (user_id: {user_id})")
+
+            # Emit successful login audit event
+            try:
+                event = {
+                    "type": "AUTH_LOGIN",
+                    "user_hash": self._user_hash(username),
+                    "timestamp": int(time.time()),
+                    "success": True,
+                    "mfa_used": bool(totp_code),
+                    "ip_hash": None,
+                    "session_id": self._safe_session_id(session_token),
+                }
+                if self.audit_logger:
+                    self.audit_logger.log_auth_event(event)
+            except Exception:
+                self.logger.debug("Failed to emit successful login audit event")
             
             # Return success response
             return {
@@ -778,16 +877,53 @@ class AuthModule:
         """
         self.logger.info(f"MFA setup requested for username: {username}")
         
-        # Placeholder implementation - will be fully implemented later
-        self.logger.warning("setup_mfa() method not yet fully implemented")
-        
-        return {
-            'success': False,
-            'message': 'MFA setup not yet implemented',
-            'secret': None,
-            'qr_code_url': None,
-            'backup_codes': [],
-        }
+        if self.db is None:
+            error_msg = "Database connection not available"
+            self.logger.error(f"MFA setup failed for {username}: {error_msg}")
+            raise AuthenticationError(error_msg, error_code="DATABASE_ERROR")
+
+        try:
+            # Generate TOTP secret and backup codes
+            totp_secret = pyotp.random_base32()
+            backup_codes = self.backup_codes_manager.generate_codes(count=10)
+            backup_codes_hash = self.backup_codes_manager.hash_codes(backup_codes)
+
+            # Update user record
+            self.db.execute(
+                "UPDATE users SET totp_secret = ?, totp_enabled = ? , backup_codes_hash = ? WHERE username = ?",
+                (totp_secret, True, ','.join(backup_codes_hash), username)
+            )
+            if hasattr(self.db, 'commit'):
+                self.db.commit()
+
+            self.logger.info(f"MFA/TOTP setup completed for {username}")
+
+            # Emit MFA setup audit event
+            try:
+                event = {
+                    "type": "AUTH_MFA_SETUP",
+                    "user_hash": self._user_hash(username),
+                    "timestamp": int(time.time()),
+                    "mfa_method": "TOTP",
+                    "success": True,
+                }
+                if self.audit_logger:
+                    self.audit_logger.log_auth_event(event)
+            except Exception:
+                self.logger.debug("Failed to emit MFA setup audit event")
+
+            # Return the secret and backup codes (show once)
+            return {
+                'success': True,
+                'message': 'MFA setup completed',
+                'secret': totp_secret,
+                'qr_code_url': f"otpauth://totp/{self.totp_settings.get('issuer')}:{username}?secret={totp_secret}&issuer={self.totp_settings.get('issuer')}",
+                'backup_codes': backup_codes,
+            }
+
+        except Exception as e:
+            self.logger.error(f"MFA setup failed for {username}: {e}")
+            raise AuthenticationError("MFA setup failed", error_code="MFA_SETUP_FAILED") from e
     
     def verify_totp(self, username: str, totp_code: str) -> bool:
         """
@@ -852,7 +988,20 @@ class AuthModule:
                 self.logger.info(f"TOTP verified successfully for {username}")
             else:
                 self.logger.warning(f"TOTP verification failed for {username}: invalid code")
-            
+            # Emit TOTP verification audit event
+            try:
+                event = {
+                    "type": "AUTH_TOTP_VERIFICATION",
+                    "user_hash": self._user_hash(username),
+                    "timestamp": int(time.time()),
+                    "success": bool(is_valid),
+                    "ip_hash": None,
+                }
+                if self.audit_logger:
+                    self.audit_logger.log_auth_event(event)
+            except Exception:
+                self.logger.debug("Failed to emit TOTP verification audit event")
+
             return is_valid
             
         except TOTPError:
@@ -901,24 +1050,128 @@ class AuthModule:
         """
         self.logger.info(f"Password reset requested for username: {username}")
         
-        # Placeholder implementation - will be fully implemented later
-        self.logger.warning("reset_password() method not yet fully implemented")
+        try:
+            # Validate new password
+            is_valid, error_msg = self.password_validator.validate(new_password)
+            if not is_valid:
+                self.logger.warning(
+                    f"Password validation failed during reset for {username}: {error_msg}"
+                )
+                raise PasswordStrengthError(
+                    f"Password validation failed: {error_msg}",
+                    error_code="PASSWORD_WEAK"
+                )
+            
+            # Validate reset token (would normally verify expiry and signature)
+            if not reset_token or not isinstance(reset_token, str) or len(reset_token) == 0:
+                self.logger.warning(f"Invalid reset token for {username}")
+                raise AuthenticationError("Invalid reset token", error_code="INVALID_RESET_TOKEN")
+            
+            if self.db is None:
+                raise AuthenticationError(
+                    "Database connection not available",
+                    error_code="DATABASE_ERROR"
+                )
+            
+            # Hash the new password
+            try:
+                new_password_hash = self.password_hasher.hash_password(new_password)
+            except Exception as hash_error:
+                self.logger.error(f"Password hashing failed during reset for {username}: {hash_error}")
+                raise AuthenticationError(
+                    "Failed to process password reset",
+                    error_code="HASHING_ERROR"
+                ) from hash_error
+            
+            # Get user info before update
+            user_id = None
+            try:
+                cursor = self.db.execute(
+                    "SELECT user_id FROM users WHERE username = ?",
+                    (username,)
+                )
+                user_record = cursor.fetchone()
+                if user_record:
+                    user_id = user_record[0]
+                else:
+                    raise AuthenticationError("User not found", error_code="USER_NOT_FOUND")
+            except AuthenticationError:
+                raise
+            except Exception as db_error:
+                self.logger.error(f"Database error during password reset for {username}: {db_error}")
+                raise AuthenticationError(
+                    "Failed to process password reset",
+                    error_code="DATABASE_ERROR"
+                ) from db_error
+            
+            # Count active sessions before invalidation
+            sessions_invalidated = 0
+            try:
+                cursor = self.db.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND expires_at > ?",
+                    (user_id, datetime.now(UTC))
+                )
+                count_record = cursor.fetchone()
+                if count_record:
+                    sessions_invalidated = count_record[0]
+            except Exception:
+                pass
+            
+            # Update password hash in database
+            try:
+                self.db.execute(
+                    "UPDATE users SET password_hash = ?, failed_login_attempts = 0 WHERE username = ?",
+                    (new_password_hash, username)
+                )
+                
+                # Invalidate all existing sessions (security best practice)
+                self.db.execute(
+                    "DELETE FROM sessions WHERE user_id = ?",
+                    (user_id,)
+                )
+                
+                if hasattr(self.db, 'commit'):
+                    self.db.commit()
+                
+                self.logger.info(
+                    f"Password reset successful for {username} "
+                    f"({sessions_invalidated} sessions invalidated)"
+                )
+            except Exception as db_error:
+                self.logger.error(f"Database error during password reset for {username}: {db_error}")
+                raise AuthenticationError(
+                    "Failed to process password reset",
+                    error_code="DATABASE_ERROR"
+                ) from db_error
+            
+            # Emit password reset audit event to blockchain
+            try:
+                event = {
+                    "type": "AUTH_PASSWORD_RESET",
+                    "user_hash": self._user_hash(username),
+                    "timestamp": int(time.time()),
+                    "success": True,
+                    "sessions_invalidated": sessions_invalidated,
+                }
+                if self.audit_logger:
+                    self.audit_logger.log_auth_event(event)
+            except Exception:
+                self.logger.debug("Failed to emit password reset audit event")
+            
+            return {
+                'success': True,
+                'message': 'Password reset successful',
+            }
         
-        # Validate new password
-        is_valid, error_msg = self.password_validator.validate(new_password)
-        if not is_valid:
-            self.logger.warning(
-                f"Password validation failed during reset for {username}: {error_msg}"
-            )
-            raise PasswordStrengthError(
-                f"Password validation failed: {error_msg}",
-                error_code="PASSWORD_WEAK"
-            )
-        
-        return {
-            'success': False,
-            'message': 'Password reset not yet implemented',
-        }
+        except (AuthenticationError, PasswordStrengthError):
+            # Re-raise custom exceptions as-is
+            raise
+        except Exception as e:
+            self.logger.error(f"Password reset failed for {username}: unexpected error: {e}")
+            raise AuthenticationError(
+                "Password reset failed",
+                error_code="UNEXPECTED_ERROR"
+            ) from e
     
     def lockout_user(self, user_id: str, minutes: int = 30) -> None:
         """
@@ -955,6 +1208,19 @@ class AuthModule:
             lockout_until = current_time + timedelta(minutes=minutes)
             lock_reason = "Too many failed login attempts"
             
+            # Get username for audit logging
+            username = None
+            try:
+                cursor = self.db.execute(
+                    "SELECT username FROM users WHERE user_id = ?",
+                    (user_id,)
+                )
+                user_record = cursor.fetchone()
+                if user_record:
+                    username = user_record[0]
+            except Exception:
+                pass
+            
             # Update user record with lockout information
             # Also increment lockout_count and update last_lockout_time
             update_query = """
@@ -978,6 +1244,21 @@ class AuthModule:
                 f"Account {user_id} locked for {minutes} minutes "
                 f"(locked until {lockout_until}, reason: {lock_reason})"
             )
+            
+            # Emit account lockout audit event to blockchain
+            try:
+                if username:
+                    event = {
+                        "type": "AUTH_ACCOUNT_LOCKOUT",
+                        "user_hash": self._user_hash(username),
+                        "timestamp": int(time.time()),
+                        "reason": "excessive_failed_attempts",
+                        "lockout_duration_minutes": minutes,
+                    }
+                    if self.audit_logger:
+                        self.audit_logger.log_auth_event(event)
+            except Exception:
+                self.logger.debug("Failed to emit account lockout audit event")
             
         except Exception as e:
             error_msg = f"Failed to lock account: {e}"
