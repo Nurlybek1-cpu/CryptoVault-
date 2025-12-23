@@ -14,6 +14,7 @@ from src.blockchain.block import Block
 from src.blockchain.merkle_tree import MerkleTree
 from src.blockchain.proof_of_work import ProofOfWork
 from src.blockchain.chain_validator import ChainValidator
+from src.blockchain.chain_reorganizer import ChainReorganizer
 from exceptions import (
     BlockchainError, BlockValidationError, TransactionError,
     ChainReorganizationError, AuditTrailError, ProofOfWorkError
@@ -69,6 +70,7 @@ class BlockchainModule:
         self.nonce_range: Tuple[int, int] = nonce_range
         self.tx_validator = validator
         self.validator = ChainValidator()
+        self.chain_reorganizer = ChainReorganizer(self.validator)
         self.logger: logging.Logger = logger or self._setup_logger()
         self.pow = ProofOfWork()
         
@@ -380,6 +382,46 @@ class BlockchainModule:
             "blocks_validated": blocks_validated,
             "errors": errors,
         }
+
+    def receive_chain(self, received_chain: List[Block]) -> Dict[str, Any]:
+        """
+        Handle a competing chain from another node and reorganize if needed.
+        """
+        result: Dict[str, Any] = {
+            "success": False,
+            "reason": "",
+        }
+
+        try:
+            # Decide which chain should be adopted (longest valid rule)
+            longest = self.chain_reorganizer.find_longest_chain(
+                received_chain, self.chain
+            )
+
+            if longest is self.chain:
+                result["reason"] = "Current chain is longer or preferred"
+                return result
+
+            # Perform reorganization
+            reorg_info = self.chain_reorganizer.reorganize_chain(
+                received_chain, self.chain
+            )
+
+            # Update local chain
+            self.chain = received_chain
+
+            # Restore rolled-back transactions to pending
+            removed_txs = reorg_info.get("removed_transactions", [])
+            self.pending_transactions.extend(removed_txs)
+
+            result.update(reorg_info)
+            result["success"] = True
+            return result
+
+        except ChainReorganizationError as e:
+            self.logger.warning(f"Chain reorganization rejected: {e}")
+            result["reason"] = str(e)
+            return result
     
     def get_block(self, index: int) -> Dict[str, Any]:
         """
