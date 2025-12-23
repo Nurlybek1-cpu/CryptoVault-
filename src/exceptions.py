@@ -259,3 +259,43 @@ class PasswordResetError(AuthenticationError):
         super().__init__(message, error_code)
         self.token_id = token_id
 
+
+"""
+Blockchain module exceptions for CryptoVault.
+Provides custom exception classes for blockchain operations and validation.
+"""
+
+
+class BlockchainError(Exception):
+    """Base exception for blockchain-related errors."""
+    pass
+
+
+class BlockValidationError(BlockchainError):
+    """Raised when block validation fails."""
+    pass
+
+
+class MerkleTreeError(BlockchainError):
+    """Raised when Merkle tree operations fail."""
+    pass
+
+
+class ProofOfWorkError(BlockchainError):
+    """Raised when Proof of Work validation fails."""
+    pass
+
+
+class ChainReorganizationError(BlockchainError):
+    """Raised when chain reorganization fails."""
+    pass
+
+
+class TransactionError(BlockchainError):
+    """Raised when transaction validation fails."""
+    pass
+
+
+class AuditTrailError(BlockchainError):
+    """Raised when audit trail operations fail."""
+    pass
