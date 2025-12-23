@@ -344,8 +344,13 @@ class BackupCodesManager:
                 logger.error(f"Backup code removal failed: {error_msg}")
                 return False
             
-            # Parse backup codes hash string (comma-separated)
-            backup_codes_hash_str = user_record[0]
+            # Parse backup codes hash string (comma-separated).
+            # Some database adapters return a single-column tuple (hashes,),
+            # while our mock database returns the full user tuple (hashes at index 8).
+            if len(user_record) >= 9:
+                backup_codes_hash_str = user_record[8]
+            else:
+                backup_codes_hash_str = user_record[0]
             if not backup_codes_hash_str:
                 error_msg = "No backup codes found for user"
                 logger.warning(f"Backup code removal failed for {username}: {error_msg}")
