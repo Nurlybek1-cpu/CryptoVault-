@@ -15,6 +15,7 @@ from src.blockchain.merkle_tree import MerkleTree
 from src.blockchain.proof_of_work import ProofOfWork
 from src.blockchain.chain_validator import ChainValidator
 from src.blockchain.chain_reorganizer import ChainReorganizer
+from src.blockchain.transaction_verifier import TransactionVerifier
 from exceptions import (
     BlockchainError, BlockValidationError, TransactionError,
     ChainReorganizationError, AuditTrailError, ProofOfWorkError
@@ -70,6 +71,7 @@ class BlockchainModule:
         self.nonce_range: Tuple[int, int] = nonce_range
         self.tx_validator = validator
         self.validator = ChainValidator()
+        self.tx_verifier = TransactionVerifier()
         self.chain_reorganizer = ChainReorganizer(self.validator)
         self.logger: logging.Logger = logger or self._setup_logger()
         self.pow = ProofOfWork()
@@ -128,7 +130,11 @@ class BlockchainModule:
         )
         return genesis_block
     
-    def add_transaction(self, transaction_dict: Dict[str, Any]) -> bool:
+    def add_transaction(
+        self,
+        transaction_dict: Dict[str, Any],
+        sender_pubkey: Any = None,
+    ) -> bool:
         """
         Add transaction to pending transactions pool.
         
@@ -159,9 +165,18 @@ class BlockchainModule:
             raise TransactionError(
                 f"Transaction missing required fields: {missing_fields}"
             )
-        
-        # Verify transaction signature if validator available
-        if self.validator and not self.verify_transaction_signature(transaction_dict):
+        # Basic amount check
+        if transaction_dict['amount'] <= 0:
+            raise TransactionError("Transaction amount must be positive")
+
+        # Verify transaction signature if public key provided
+        if sender_pubkey is not None:
+            if not self.tx_verifier.validate_transaction(transaction_dict, sender_pubkey):
+                raise TransactionError(
+                    f"Transaction {transaction_dict.get('id')} failed ECDSA signature verification"
+                )
+        # Otherwise, fall back to external validator if configured
+        elif self.tx_validator and not self.verify_transaction_signature(transaction_dict):
             raise TransactionError(
                 f"Transaction {transaction_dict.get('id')} failed signature verification"
             )
