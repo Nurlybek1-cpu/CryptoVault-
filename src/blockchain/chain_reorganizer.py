@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 
 from src.blockchain.block import Block
 from src.blockchain.chain_validator import ChainValidator
-from exceptions import ChainReorganizationError
+from src.exceptions import ChainReorganizationError
 
 
 class ChainReorganizer:

@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import List, Tuple, Optional
 
-from exceptions import MerkleTreeError
+from src.exceptions import MerkleTreeError
 
 
 class MerkleTree:

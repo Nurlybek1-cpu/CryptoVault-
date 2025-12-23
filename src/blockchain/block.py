@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from exceptions import BlockValidationError, ProofOfWorkError
+from src.exceptions import BlockValidationError, ProofOfWorkError
 
 logger = logging.getLogger(__name__)
 

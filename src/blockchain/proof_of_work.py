@@ -6,7 +6,7 @@ import logging
 from typing import List
 
 from src.blockchain.block import Block
-from exceptions import ProofOfWorkError
+from src.exceptions import ProofOfWorkError
 
 logger = logging.getLogger(__name__)
 

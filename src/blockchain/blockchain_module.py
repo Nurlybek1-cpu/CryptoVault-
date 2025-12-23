@@ -16,7 +16,7 @@ from src.blockchain.proof_of_work import ProofOfWork
 from src.blockchain.chain_validator import ChainValidator
 from src.blockchain.chain_reorganizer import ChainReorganizer
 from src.blockchain.transaction_verifier import TransactionVerifier
-from exceptions import (
+from src.exceptions import (
     BlockchainError, BlockValidationError, TransactionError,
     ChainReorganizationError, AuditTrailError, ProofOfWorkError
 )
