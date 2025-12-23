@@ -40,10 +40,10 @@ import time
 import json
 import logging
 
-from block import Block
-from blockchain_module import BlockchainModule
-from merkle_tree import MerkleTree
-from exceptions import (
+from .block import Block
+from .blockchain_module import BlockchainModule
+from .merkle_tree import MerkleTree
+from ..exceptions import (
     BlockchainError,
     BlockValidationError,
     MerkleTreeError,
