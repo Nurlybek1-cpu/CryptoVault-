@@ -398,6 +398,127 @@ trail = audit_logger.get_user_audit_trail(user_hash)
 login_events = [e for e in trail if e['type'] in ['AUTH_LOGIN', 'AUTH_LOGIN_FAILED']]
 ```
 
+## Authentication Module Security Analysis
+
+### Threat Model
+
+This section describes the threat model for the Authentication Module and the mitigations applied to protect user credentials, sessions, and authentication flows.
+
+### Threats Identified
+
+- **Password Brute-Force Attack**
+
+  Threat: Attacker tries many password combinations against a user account.
+
+  Mitigation:
+  - Use Argon2id (or equivalent) with high work factor — target 100,000+ iterations or an equivalent memory/time cost appropriate for the deployment.
+  - Rate limiting: default policy of 5 attempts per 15 minutes.
+  - Account lockout: lock account for 30 minutes after 5 failed attempts.
+  - Fail safely: return generic error messages to the client to avoid account enumeration.
+
+- **Man-in-the-Middle (MITM) Attack**
+
+  Threat: Attacker intercepts credentials or session tokens in transit.
+
+  Mitigation:
+  - Enforce HTTPS everywhere (application and deployment configuration).
+  - Use HMAC-signed session tokens so tokens cannot be forged by attackers without secret key.
+  - Protect endpoints via client authentication and CSRF protections where applicable.
+  - Time-limit and single-use properties for tokens and codes (reset tokens, one-time backup codes).
+
+- **Credential Stuffing**
+
+  Threat: Re-using leaked credentials from other services to authenticate.
+
+  Mitigation:
+  - Strong password requirements (minimum 12 characters, mixed character classes, disallow common passwords).
+  - Rate limiting per username and per IP address (IP-based limits as future enhancement).
+  - Detect and log suspicious patterns (audit events for repeated failed attempts) for investigation.
+
+- **Session Hijacking**
+
+  Threat: Attacker obtains a valid session token and impersonates the user.
+
+  Mitigation:
+  - Use cryptographically secure random session tokens (CSPRNG via `secrets` module).
+  - Sessions expire after 24 hours by default.
+  - Session tokens include HMAC and nonce to prevent forgery and replay.
+  - Optional verification: record hashed user-agent and hashed IP for additional checks and detect anomalies.
+  - Immediate session invalidation on suspicious activity (password reset, explicit logout).
+
+- **Timing Attacks**
+
+  Threat: An attacker infers valid credentials by measuring response times.
+
+  Mitigation:
+  - Constant-time password comparison using `hmac.compare_digest`.
+  - Normalize response timing for authentication failures vs successes where practical.
+  - Use generic error messages to avoid disclosing user existence.
+
+- **Replay Attacks**
+
+  Threat: Replay of old TOTP codes or session tokens to gain access.
+
+  Mitigation:
+  - TOTP is time-based (30-second windows) and checked with a limited tolerance window.
+  - Session tokens incorporate nonce and timestamp so replay is ineffective.
+  - Backup codes are single-use and removed after successful use.
+  - All time-sensitive operations validated with server-side timestamps.
+
+- **Account Enumeration**
+
+  Threat: Attacker discovers valid usernames via API responses.
+
+  Mitigation:
+  - Generic error messages for authentication and password reset flows (e.g., "Invalid credentials" or "If account exists, reset instructions sent").
+  - Keep response times consistent for existing and non-existing users.
+
+### Security Assumptions
+
+- Passwords are transmitted over HTTPS (encrypted in transit).
+- Database is protected and encrypted at rest.
+- Secrets for HMAC signing are stored securely in environment variables or an HSM.
+- Server clocks are synchronized (NTP) to support TOTP windows.
+- Random number generation uses CSPRNG (`secrets` module) for keys and nonces.
+
+### Limitations & Future Improvements
+
+Current Limitations:
+- Single-machine rate limiting (in-memory or local store) — lost on restart and not distributed.
+- File or simple DB-based session storage may not scale across multiple servers.
+- IP-based rate limiting not implemented as default (recommended enhancement).
+
+Recommended Future Improvements:
+- Use a distributed rate limiter (Redis) for consistent enforcement across nodes.
+- Move session storage to a distributed store (Redis, database) with proper TTL.
+- Use an HSM or managed key service for HMAC and other private keys.
+- Add IP-based and geo-based rate limiting to detect distributed attack sources.
+- Add email verification and out-of-band notifications for password reset and security events.
+- Implement additional 2FA channels (FIDO2/WebAuthn, hardware keys) and passwordless options.
+
+### Testing Coverage
+
+- Unit tests: cover password validation, hashing, login flows, and MFA verification (aim for 70%+ coverage of auth functions).
+- Security tests: timing attack simulations, brute-force resilience, session hijacking tests.
+- Integration tests: full authentication flows including registration -> login -> MFA -> password reset.
+- Manual review: periodic threat model review and pen-testing recommended.
+
+### Compliance
+
+- Follow OWASP Authentication and Session Management best practices.
+- CWE items addressed or monitored:
+  - CWE-256: Plaintext Storage of Password (avoid storing plaintext; use Argon2id)
+  - CWE-620: Unvalidated Password Change (validate tokens and ownership)
+  - CWE-640: Weak Password Recovery Mechanism (do not reveal account existence)
+- Aligns with NIST SP 800-63B guidance for password handling.
+
+### References
+
+- OWASP Authentication Cheat Sheet
+- OWASP Session Management Cheat Sheet
+- OWASP Password Storage Cheat Sheet
+- NIST Digital Identity Guidelines (SP 800-63B)
+
 #### Detect Failed Login Attempts
 ```python
 user_hash = sha256("alice")
