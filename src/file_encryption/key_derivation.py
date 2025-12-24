@@ -183,7 +183,16 @@ class KeyDerivation:
             >>> salt = kdf.generate_random_salt(32)
             >>> print(f"Salt: {salt.hex()}")
         """
-        raise NotImplementedError("Implementation pending")
+        if length < self.DEFAULT_SALT_LENGTH:
+            raise ValueError(
+                f"salt length must be at least {self.DEFAULT_SALT_LENGTH} bytes"
+            )
+
+        try:
+            return os.urandom(length)
+        except Exception as exc:  # pragma: no cover - os.urandom should not fail
+            self._logger.exception("Failed to generate random salt")
+            raise KeyDerivationError("Failed to generate random salt") from exc
 
     def validate_key_strength(self, key: bytes) -> bool:
         """
