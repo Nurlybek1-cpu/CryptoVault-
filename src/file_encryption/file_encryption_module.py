@@ -39,6 +39,8 @@ from src.exceptions import KeyDerivationError
 from src.file_encryption.file_encryptor import FileEncryptor
 from src.file_encryption.key_wrapping import KeyWrapper
 from src.exceptions import KeyDecodingError
+from src.file_encryption.file_integrity import FileIntegrity
+from src.exceptions import FileIntegrityError, FileTamperingDetected
 
 
 @dataclass
@@ -185,6 +187,8 @@ class FileEncryptionModule:
         self.file_encryptor = FileEncryptor()
         # Key wrapper (AES-KW) for wrapping FEKs with master key
         self.key_wrapper = KeyWrapper()
+        # File integrity utilities
+        self.file_integrity = FileIntegrity()
         self._logger.info(
             "FileEncryptionModule initialized",
             extra={
@@ -473,34 +477,64 @@ class FileEncryptionModule:
             >>> hash_value = module.get_file_integrity_hash("document.pdf")
             >>> print(f"SHA-256: {hash_value}")
         """
-        raise NotImplementedError("Implementation pending")
+        try:
+            return self.file_integrity.calculate_file_hash(filepath)
+        except FileIntegrityError:
+            raise
+        except Exception:
+            self._logger.exception("Failed to get file integrity hash")
+            raise
 
-    def verify_file_authenticity(
-            self,
-            filepath: str,
-            hmac_signature: str,
-    ) -> bool:
+    def get_file_authenticity_hmac(self, filepath: str, key: bytes) -> str:
         """
-        Verify file authenticity using HMAC.
+        Compute HMAC-SHA256 of a file for authenticity.
 
-        Computes the HMAC-SHA256 of the file and compares it with
-        the provided signature to verify authenticity.
+        Reads the file in chunks and computes the HMAC using the provided key.
 
         Args:
-            filepath: Path to the file to verify
-            hmac_signature: Expected HMAC signature in hexadecimal format
+            filepath: Path to the file to compute HMAC for
+            key: Key bytes to use for HMAC computation
 
         Returns:
-            bool: True if HMAC matches, False otherwise
+            str: Hexadecimal HMAC-SHA256 of the file
 
         Raises:
             FileIntegrityError: If HMAC computation fails
             FileNotFoundError: If the file does not exist
 
         Example:
-            >>> is_authentic = module.verify_file_authenticity("file.enc", "hmac...")
+            >>> hmac_value = module.get_file_authenticity_hmac("file.enc", key)
         """
-        raise NotImplementedError("Implementation pending")
+        try:
+            return self.file_integrity.calculate_file_hmac(filepath, key)
+        except FileIntegrityError:
+            raise
+        except Exception:
+            self._logger.exception("Failed to compute file HMAC")
+            raise
+
+    def verify_file_integrity(self, filepath: str, expected_hash: str) -> bool:
+        try:
+            return self.file_integrity.verify_file_integrity(filepath, expected_hash)
+        except FileIntegrityError:
+            raise
+        except Exception:
+            self._logger.exception("Failed to verify file integrity")
+            raise
+
+    def verify_file_authenticity(self, filepath: str, expected_hmac: str, key: bytes) -> bool:
+        try:
+            ok = self.file_integrity.verify_file_authenticity(filepath, expected_hmac, key)
+            if not ok:
+                raise FileTamperingDetected("File authenticity HMAC verification failed", filepath=filepath)
+            return True
+        except FileTamperingDetected:
+            raise
+        except FileIntegrityError:
+            raise
+        except Exception:
+            self._logger.exception("Failed to verify file authenticity")
+            raise
 
     def setup_file_sharing(
             self,
