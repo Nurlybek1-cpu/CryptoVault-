@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 from src.file_encryption.key_derivation import KeyDerivation
 from src.exceptions import KeyDerivationError
+from src.file_encryption.file_encryptor import FileEncryptor
 
 
 @dataclass
@@ -178,6 +179,8 @@ class FileEncryptionModule:
         )
         # Key derivation utility
         self.key_derivation = KeyDerivation()
+        # File encryptor for streaming operations
+        self.file_encryptor = FileEncryptor()
         self._logger.info(
             "FileEncryptionModule initialized",
             extra={
