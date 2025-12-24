@@ -41,6 +41,7 @@ from src.file_encryption.key_wrapping import KeyWrapper
 from src.exceptions import KeyDecodingError
 from src.file_encryption.file_integrity import FileIntegrity
 from src.exceptions import FileIntegrityError, FileTamperingDetected
+from src.file_encryption.file_sharing import FileSharing
 
 
 @dataclass
@@ -189,6 +190,8 @@ class FileEncryptionModule:
         self.key_wrapper = KeyWrapper()
         # File integrity utilities
         self.file_integrity = FileIntegrity()
+        # File sharing utilities (RSA-OAEP for FEK sharing)
+        self.file_sharing = FileSharing(user_id=user_id)
         self._logger.info(
             "FileEncryptionModule initialized",
             extra={
@@ -539,35 +542,190 @@ class FileEncryptionModule:
     def setup_file_sharing(
             self,
             file_id: str,
-            recipient_pubkey: bytes,
+            encrypted_fek: bytes,
+            recipient_pubkey,
+            recipient_id: str,
+            expiry_days: int | None = None,
     ) -> dict:
         """
         Set up file sharing with a recipient using public key cryptography.
 
         Encrypts the File Encryption Key for the recipient using their
-        public key, enabling secure file sharing without password exchange.
+        public key (RSA-OAEP), enabling secure file sharing without password
+        exchange. Only the recipient with the corresponding private key can
+        decrypt the FEK and access the shared file.
 
         Args:
-            file_id: Unique identifier of the encrypted file
-            recipient_pubkey: Recipient's public key (X25519 or RSA)
+            file_id: Unique identifier of the file being shared
+            encrypted_fek: Wrapped FEK bytes to encrypt for recipient
+            recipient_pubkey: Recipient's RSA public key
+            recipient_id: User ID of the recipient
+            expiry_days: Optional days until share expires (None for permanent)
 
         Returns:
-            dict: Sharing information containing:
+            dict: Share record containing:
                 - share_id: Unique identifier for this share
-                - encrypted_fek: FEK encrypted for recipient
-                - file_id: Original file identifier
-                - created_at: Timestamp of share creation
+                - file_id: File identifier
+                - owner_id: Owner's user ID
+                - recipient_id: Recipient's user ID
+                - encrypted_fek: Base64-encoded RSA-encrypted FEK
+                - shared_at: Timestamp of share creation
+                - expiry: Optional expiry date
+                - revoked: Access revocation status
 
         Raises:
             FileEncryptionError: If key encryption fails
             ValueError: If file_id not found or pubkey invalid
 
         Example:
-            >>> share = module.setup_file_sharing("file123", recipient_key)
+            >>> result = module.setup_file_sharing(
+            ...     "file123", fek_bytes, recipient_key, "bob", expiry_days=7
+            ... )
+            >>> print(result["share_id"])
         """
-        raise NotImplementedError("Implementation pending")
+        try:
+            share = self.file_sharing.share_file_with_recipient(
+                file_id=file_id,
+                encrypted_fek=encrypted_fek,
+                recipient_pubkey=recipient_pubkey,
+                recipient_id=recipient_id,
+                expiry_days=expiry_days
+            )
+            self._logger.info(
+                "File sharing setup completed",
+                extra={
+                    "file_id": file_id,
+                    "recipient_id": recipient_id,
+                    "share_id": share["share_id"]
+                }
+            )
+            return share
+        except Exception as exc:
+            self._logger.exception("Failed to setup file sharing")
+            raise
 
-    def create_metadata_encryption(self) -> dict:
+
+    def receive_shared_file(
+            self,
+            share_record: dict,
+            private_key,
+    ) -> bytes:
+        """
+        Decrypt shared file FEK using recipient's private key.
+
+        Decrypts the FEK that was encrypted with the recipient's public key.
+        Verifies that the share is active (not revoked and not expired).
+
+        Args:
+            share_record: Share record dict containing encrypted FEK and metadata
+            private_key: Recipient's RSA private key
+
+        Returns:
+            bytes: Decrypted File Encryption Key (32 bytes)
+
+        Raises:
+            ValueError: If share is revoked, expired, or invalid
+            KeyDecodingError: If FEK decryption fails
+
+        Example:
+            >>> fek = module.receive_shared_file(share_record, bob_private_key)
+            >>> print(f"FEK length: {len(fek)} bytes")
+        """
+        try:
+            fek = self.file_sharing.receive_shared_file(share_record, private_key)
+            self._logger.info(
+                "Shared file received and decrypted",
+                extra={
+                    "file_id": share_record.get("file_id"),
+                    "fek_length": len(fek)
+                }
+            )
+            return fek
+        except Exception as exc:
+            self._logger.exception("Failed to receive shared file")
+            raise
+
+    def revoke_file_access(
+            self,
+            file_id: str,
+            recipient_id: str,
+    ) -> bool:
+        """
+        Revoke access to a shared file for a specific recipient.
+
+        Marks the share record as revoked. The recipient can no longer
+        decrypt the FEK using the revoked share record.
+
+        Args:
+            file_id: Identifier of the file
+            recipient_id: User ID of the recipient whose access to revoke
+
+        Returns:
+            bool: True if access revoked successfully, False if share not found
+
+        Example:
+            >>> success = module.revoke_file_access("file123", "bob")
+            >>> print(f"Access revoked: {success}")
+        """
+        try:
+            success = self.file_sharing.revoke_file_access(file_id, recipient_id)
+            if success:
+                self._logger.info(
+                    "File access revoked",
+                    extra={"file_id": file_id, "recipient_id": recipient_id}
+                )
+            else:
+                self._logger.warning(
+                    "No active share found to revoke",
+                    extra={"file_id": file_id, "recipient_id": recipient_id}
+                )
+            return success
+        except Exception as exc:
+            self._logger.exception("Failed to revoke file access")
+            raise
+
+    def get_file_shares(self, file_id: str) -> list[dict]:
+        """
+        Get all active shares for a file.
+
+        Returns a list of all active (not revoked) shares for the specified file.
+
+        Args:
+            file_id: Identifier of the file
+
+        Returns:
+            list[dict]: List of share records with recipient info
+
+        Example:
+            >>> shares = module.get_file_shares("file123")
+            >>> print(f"Recipients: {[s['recipient_id'] for s in shares]}")
+        """
+        try:
+            return self.file_sharing.get_file_shares(file_id)
+        except Exception as exc:
+            self._logger.exception("Failed to get file shares")
+            raise
+
+    def get_user_shared_files(self) -> list[dict]:
+        """
+        Get all files shared by this user.
+
+        Returns a list of all files that this user (the owner) has shared.
+
+        Returns:
+            list[dict]: List of shared file information with recipients
+
+        Example:
+            >>> shared = module.get_user_shared_files()
+            >>> for f in shared:
+            ...     print(f"File {f['file_id']} recipients: {f['recipients']}")
+        """
+        try:
+            return self.file_sharing.get_user_shared_files()
+        except Exception as exc:
+            self._logger.exception("Failed to get user shared files")
+            raise
+
         """
         Create encrypted metadata structure for a file.
 
