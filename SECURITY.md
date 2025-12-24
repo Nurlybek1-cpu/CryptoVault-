@@ -318,12 +318,6 @@ We take the following vulnerability classes seriously:
 |---------|------|---------|
 | 1.0 | Dec 2024 | Initial security policy |
 
-## Contact
-
-- **Security Team**: security@cryptovault.dev
-- **Bug Reports**: issues@cryptovault.dev
-- **General Questions**: support@cryptovault.dev
-
 ---
 
 **Last Updated**: December 2024  
