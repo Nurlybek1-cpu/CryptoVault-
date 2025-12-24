@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Generator
@@ -42,6 +43,7 @@ from src.exceptions import KeyDecodingError
 from src.file_encryption.file_integrity import FileIntegrity
 from src.exceptions import FileIntegrityError, FileTamperingDetected
 from src.file_encryption.file_sharing import FileSharing
+from src.file_encryption.metadata_encryption import MetadataEncryption
 
 
 @dataclass
@@ -192,6 +194,8 @@ class FileEncryptionModule:
         self.file_integrity = FileIntegrity()
         # File sharing utilities (RSA-OAEP for FEK sharing)
         self.file_sharing = FileSharing(user_id=user_id)
+        # Metadata encryption utilities (AES-GCM for filename/metadata)
+        self.metadata_encryption = MetadataEncryption()
         self._logger.info(
             "FileEncryptionModule initialized",
             extra={
@@ -222,69 +226,292 @@ class FileEncryptionModule:
             cipher_type: str = "AES-256-GCM",
     ) -> dict:
         """
-        Encrypt a file with authenticated encryption.
+        Encrypt a file with authenticated encryption and metadata protection.
 
-        Encrypts the specified file using the given password and cipher type.
-        Returns a dictionary containing file metadata and encryption details.
+        Complete workflow:
+        1. Derive master key from password using PBKDF2
+        2. Generate random File Encryption Key (FEK)
+        3. Encrypt file content with FEK using AES-256-GCM (streaming)
+        4. Encrypt metadata (filename, size, MIME type) with master key
+        5. Wrap FEK with master key using AES-KW
+        6. Compute file integrity hash and HMAC
+        7. Return encrypted file path and metadata
 
         Args:
             filepath: Path to the file to encrypt
-            password: Password for key derivation
+            password: Password for key derivation (PBKDF2)
             cipher_type: Encryption algorithm ("AES-256-GCM" or "ChaCha20-Poly1305")
 
         Returns:
             dict: Encryption result containing:
-                - file_id: Unique identifier for the encrypted file
-                - encrypted_filepath: Path to the encrypted file
-                - original_hash: SHA-256 hash of the original file
+                - file_id: Unique identifier for encrypted file
+                - encrypted_filepath: Path to encrypted file
+                - original_filename: Original filename (for reference)
+                - original_size: Original file size in bytes
+                - encrypted_size: Encrypted file size in bytes
                 - cipher_type: Algorithm used for encryption
+                - master_key_salt: Salt for PBKDF2 key derivation
+                - encrypted_fek: Wrapped FEK (AES-KW encrypted with master key)
+                - encrypted_metadata: Encrypted filename/size/mime metadata
+                - file_hash: SHA-256 hash of original file
+                - file_hmac: HMAC-SHA256 of original file
                 - created_at: Timestamp of encryption
 
         Raises:
             FileEncryptionError: If encryption fails
             KeyDerivationError: If key derivation fails
-            FileNotFoundError: If the input file does not exist
+            FileNotFoundError: If input file does not exist
             ValueError: If cipher_type is not supported
 
         Example:
             >>> result = module.encrypt_file("document.pdf", "password123")
-            >>> print(result["file_id"])
+            >>> print(f"File ID: {result['file_id']}")
+            >>> print(f"Encrypted: {result['encrypted_filepath']}")
         """
-        raise NotImplementedError("Implementation pending")
+        if not filepath:
+            raise ValueError("filepath is required")
+
+        if not password:
+            raise ValueError("password is required")
+
+        if cipher_type not in self.SUPPORTED_CIPHERS:
+            raise ValueError(f"Unsupported cipher: {cipher_type}")
+
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"File not found: {filepath}")
+
+        try:
+            # Get original file info
+            original_filename = os.path.basename(filepath)
+            original_size = os.path.getsize(filepath)
+            mime_type = "application/octet-stream"  # Default; could be detected
+
+            # Derive master key from password
+            master_key, salt = self.derive_master_key(password)
+
+            # Encrypt file metadata (filename hidden)
+            encrypted_metadata = self.encrypt_file_metadata(
+                original_filename=original_filename,
+                file_size=original_size,
+                mime_type=mime_type,
+                master_key=master_key,
+            )
+
+            # Encrypt file content (FileEncryptor creates and manages FEK internally)
+            file_id = f"file_{int(datetime.utcnow().timestamp() * 1000000)}"
+            encrypted_filepath = os.path.join(
+                os.path.dirname(filepath),
+                f"{file_id}.enc"
+            )
+
+            encryption_result = self.file_encryptor.encrypt_file_streaming(
+                input_path=filepath,
+                output_path=encrypted_filepath,
+                master_key=master_key,
+                cipher_type=cipher_type,
+            )
+
+            # Extract FEK from encryption result (FileEncryptor created it)
+            encrypted_fek_b64 = encryption_result["encrypted_fek"]
+            encrypted_fek = base64.b64decode(encrypted_fek_b64)
+
+            # Compute file integrity metrics
+            original_file_hash = self.get_file_integrity_hash(filepath)
+            file_hmac = self.get_file_authenticity_hmac(filepath, master_key)
+
+            # Update statistics
+            self._statistics.files_encrypted += 1
+            self._statistics.bytes_encrypted += original_size
+            self._statistics.last_operation_time = datetime.utcnow()
+
+            result = {
+                "file_id": file_id,
+                "encrypted_filepath": encrypted_filepath,
+                "original_filename": original_filename,
+                "original_size": original_size,
+                "encrypted_size": encryption_result.get("file_size_encrypted", 0),
+                "cipher_type": cipher_type,
+                "master_key_salt": base64.b64encode(salt).decode("utf-8"),
+                "encrypted_fek": encrypted_fek_b64,
+                "encrypted_metadata": encrypted_metadata,
+                "file_hash": original_file_hash,
+                "file_hmac": file_hmac,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+
+            self._logger.info(
+                "File encrypted successfully",
+                extra={
+                    "file_id": file_id,
+                    "filename": original_filename,
+                    "size": original_size,
+                    "encrypted_size": result["encrypted_size"],
+                }
+            )
+
+            return result
+
+        except (FileNotFoundError, ValueError):
+            raise
+        except Exception as exc:
+            self._logger.exception("Failed to encrypt file")
+            raise
 
     def decrypt_file(
             self,
             encrypted_filepath: str,
             password: str,
+            encryption_result: dict,
     ) -> dict:
         """
-        Decrypt an encrypted file.
+        Decrypt an encrypted file and restore metadata.
 
-        Decrypts the specified encrypted file using the provided password.
-        Verifies file integrity before returning the decrypted content.
+        Complete workflow:
+        1. Decode salt from encryption result
+        2. Derive master key from password using PBKDF2 (with salt)
+        3. Decrypt metadata to verify key and retrieve filename
+        4. Unwrap FEK using master key (AES-KW)
+        5. Decrypt file content with FEK
+        6. Verify file integrity (hash and HMAC)
+        7. Restore original filename (optional)
 
         Args:
             encrypted_filepath: Path to the encrypted file
-            password: Password for key derivation
+            password: Password for key derivation (must match encryption)
+            encryption_result: Dict returned from encrypt_file() containing:
+                - master_key_salt: Salt for PBKDF2
+                - encrypted_fek: Wrapped FEK
+                - encrypted_metadata: Encrypted filename/size/mime
+                - file_hash: Original file SHA-256 hash
+                - file_hmac: Original file HMAC-SHA256
 
         Returns:
             dict: Decryption result containing:
-                - decrypted_filepath: Path to the decrypted file
-                - original_filename: Original file name
+                - decrypted_filepath: Path to decrypted file
+                - original_filename: Restored original filename
                 - file_hash: SHA-256 hash of decrypted file
-                - integrity_verified: Boolean indicating integrity check result
+                - file_hmac: HMAC-SHA256 of decrypted file
+                - integrity_verified: Boolean indicating hash match
+                - authenticity_verified: Boolean indicating HMAC match
+                - created_at: Timestamp of decryption
 
         Raises:
             FileEncryptionError: If decryption fails
             FileTamperingDetected: If file integrity check fails
             FileDecodingError: If file format is invalid
-            FileNotFoundError: If the encrypted file does not exist
+            FileNotFoundError: If encrypted file does not exist
+            ValueError: If encryption_result missing required fields
 
         Example:
-            >>> result = module.decrypt_file("document.pdf.enc", "password123")
-            >>> print(result["decrypted_filepath"])
+            >>> result = module.decrypt_file(
+            ...     "file_123.enc", "password123", encryption_result
+            ... )
+            >>> print(f"Decrypted: {result['decrypted_filepath']}")
         """
-        raise NotImplementedError("Implementation pending")
+        if not encrypted_filepath:
+            raise ValueError("encrypted_filepath is required")
+
+        if not password:
+            raise ValueError("password is required")
+
+        if not encryption_result:
+            raise ValueError("encryption_result dict is required")
+
+        if not os.path.exists(encrypted_filepath):
+            raise FileNotFoundError(f"Encrypted file not found: {encrypted_filepath}")
+
+        try:
+            # Extract encryption parameters
+            salt = base64.b64decode(encryption_result["master_key_salt"])
+            encrypted_fek_b64 = encryption_result["encrypted_fek"]
+            encrypted_metadata = encryption_result["encrypted_metadata"]
+            expected_file_hash = encryption_result["file_hash"]
+            expected_file_hmac = encryption_result["file_hmac"]
+
+            # Decode wrapped FEK
+            encrypted_fek = base64.b64decode(encrypted_fek_b64)
+
+            # Derive master key from password (with same salt)
+            master_key = self.key_derivation.pbkdf2_derive(
+                password=password,
+                salt=salt,
+                iterations=self._config.pbkdf2_iterations,
+                dklen=self._config.key_length,
+            )
+
+            # Decrypt metadata to verify key and get original filename
+            metadata = self.decrypt_file_metadata(encrypted_metadata, master_key)
+            original_filename = metadata["filename"]
+
+            # Decrypt file content using FileEncryptor
+            # (FileEncryptor internally unwraps the FEK from the header)
+            file_id = os.path.splitext(os.path.basename(encrypted_filepath))[0]
+            decrypted_filepath = os.path.join(
+                os.path.dirname(encrypted_filepath),
+                original_filename,
+            )
+
+            decryption_result = self.file_encryptor.decrypt_file_streaming(
+                encrypted_path=encrypted_filepath,
+                output_path=decrypted_filepath,
+                master_key=master_key,
+            )
+
+            # Verify file integrity
+            decrypted_file_hash = self.get_file_integrity_hash(decrypted_filepath)
+            decrypted_file_hmac = self.get_file_authenticity_hmac(
+                decrypted_filepath, master_key
+            )
+
+            integrity_verified = decrypted_file_hash == expected_file_hash
+            authenticity_verified = decrypted_file_hmac == expected_file_hmac
+
+            if not integrity_verified:
+                raise FileTamperingDetected(
+                    f"File integrity check failed: hash mismatch",
+                    filepath=decrypted_filepath
+                )
+
+            if not authenticity_verified:
+                raise FileTamperingDetected(
+                    f"File authenticity check failed: HMAC mismatch",
+                    filepath=decrypted_filepath
+                )
+
+            # Update statistics
+            self._statistics.files_decrypted += 1
+            self._statistics.bytes_decrypted += os.path.getsize(decrypted_filepath)
+            self._statistics.integrity_checks_passed += 1
+            self._statistics.last_operation_time = datetime.utcnow()
+
+            result = {
+                "decrypted_filepath": decrypted_filepath,
+                "original_filename": original_filename,
+                "file_hash": decrypted_file_hash,
+                "file_hmac": decrypted_file_hmac,
+                "integrity_verified": integrity_verified,
+                "authenticity_verified": authenticity_verified,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+
+            self._logger.info(
+                "File decrypted successfully",
+                extra={
+                    "file_id": file_id,
+                    "filename": original_filename,
+                    "integrity_verified": integrity_verified,
+                    "authenticity_verified": authenticity_verified,
+                }
+            )
+
+            return result
+
+        except (ValueError, FileNotFoundError, FileTamperingDetected):
+            raise
+        except Exception as exc:
+            self._logger.exception("Failed to decrypt file")
+            raise
+
 
     def verify_file_integrity(
             self,
@@ -537,6 +764,113 @@ class FileEncryptionModule:
             raise
         except Exception:
             self._logger.exception("Failed to verify file authenticity")
+            raise
+
+    def encrypt_file_metadata(
+            self,
+            original_filename: str,
+            file_size: int,
+            mime_type: str,
+            master_key: bytes,
+            additional_data: dict | None = None,
+    ) -> dict:
+        """
+        Encrypt file metadata (filename, size, MIME type).
+
+        Encrypts sensitive metadata using AES-256-GCM with the master key.
+        Returns encrypted metadata with nonce and hash for integrity verification.
+
+        Args:
+            original_filename: Original filename (e.g., "document.pdf")
+            file_size: File size in bytes
+            mime_type: MIME type (e.g., "application/pdf")
+            master_key: 32-byte (256-bit) master key
+            additional_data: Optional additional metadata fields
+
+        Returns:
+            dict: Encrypted metadata container with:
+                - encrypted_metadata: Base64-encoded AES-GCM ciphertext
+                - nonce: Base64-encoded random nonce
+                - metadata_hash: SHA-256 hash of plaintext metadata
+
+        Raises:
+            ValueError: If parameters invalid or key incorrect size
+            MetadataEncryptionError: If encryption fails
+
+        Example:
+            >>> encrypted_meta = module.encrypt_file_metadata(
+            ...     "secret.pdf", 50000, "application/pdf", master_key
+            ... )
+            >>> print(f"Hash: {encrypted_meta['metadata_hash']}")
+        """
+        try:
+            encrypted_meta = self.metadata_encryption.encrypt_metadata(
+                original_filename=original_filename,
+                file_size=file_size,
+                mime_type=mime_type,
+                master_key=master_key,
+                additional_data=additional_data,
+            )
+            self._logger.info(
+                "File metadata encrypted",
+                extra={
+                    "filename": original_filename,
+                    "file_size": file_size,
+                    "mime_type": mime_type,
+                }
+            )
+            return encrypted_meta
+        except Exception as exc:
+            self._logger.exception("Failed to encrypt file metadata")
+            raise
+
+    def decrypt_file_metadata(
+            self,
+            encrypted_metadata_dict: dict,
+            master_key: bytes,
+    ) -> dict:
+        """
+        Decrypt file metadata.
+
+        Decrypts encrypted metadata, verifies authentication tag and hash,
+        and returns plaintext metadata dictionary.
+
+        Args:
+            encrypted_metadata_dict: Dict with encrypted_metadata, nonce, metadata_hash
+            master_key: 32-byte (256-bit) master key
+
+        Returns:
+            dict: Plaintext metadata containing:
+                - filename: Original filename
+                - file_size: File size in bytes
+                - mime_type: MIME type
+                - created_at: ISO timestamp of creation
+                - ... any additional fields
+
+        Raises:
+            ValueError: If parameters invalid or key incorrect size
+            MetadataEncryptionError: If decryption fails
+            MetadataTamperingError: If hash validation fails
+
+        Example:
+            >>> metadata = module.decrypt_file_metadata(encrypted_meta, master_key)
+            >>> print(metadata["filename"])  # "secret.pdf"
+        """
+        try:
+            metadata = self.metadata_encryption.decrypt_metadata(
+                encrypted_metadata_dict=encrypted_metadata_dict,
+                master_key=master_key,
+            )
+            self._logger.info(
+                "File metadata decrypted",
+                extra={
+                    "filename": metadata.get("filename"),
+                    "file_size": metadata.get("file_size"),
+                }
+            )
+            return metadata
+        except Exception as exc:
+            self._logger.exception("Failed to decrypt file metadata")
             raise
 
     def setup_file_sharing(
