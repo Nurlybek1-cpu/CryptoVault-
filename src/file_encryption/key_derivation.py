@@ -25,6 +25,10 @@ import os
 import secrets
 from typing import Final
 
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.backends import default_backend
+
 from src.exceptions import KeyDerivationError
 
 
@@ -72,8 +76,8 @@ class KeyDerivation:
         self,
         password: str,
         salt: bytes,
-        iterations: int,
-        dklen: int,
+        iterations: int = 100_000,
+        dklen: int = 32,
     ) -> bytes:
         """
         Derive a key from password using PBKDF2-HMAC-SHA256.
@@ -97,7 +101,33 @@ class KeyDerivation:
         Example:
             >>> key = kdf.pbkdf2_derive("password", salt, 100000, 32)
         """
-        raise NotImplementedError("Implementation pending")
+        if not password:
+            raise ValueError("password must not be empty")
+
+        if iterations < self.PBKDF2_MIN_ITERATIONS:
+            raise ValueError(
+                f"iterations must be >= {self.PBKDF2_MIN_ITERATIONS}"
+            )
+
+        if not salt or len(salt) < self.DEFAULT_SALT_LENGTH:
+            raise ValueError(
+                f"salt must be at least {self.DEFAULT_SALT_LENGTH} bytes"
+            )
+
+        try:
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=dklen,
+                salt=salt,
+                iterations=iterations,
+                backend=default_backend(),
+            )
+
+            master_key = kdf.derive(password.encode("utf-8"))
+            return master_key
+        except Exception as exc:  # pragma: no cover - surface errors to caller
+            self._logger.exception("PBKDF2 derivation failed")
+            raise KeyDerivationError("PBKDF2 derivation failed") from exc
 
     def argon2_derive(
         self,
@@ -173,4 +203,7 @@ class KeyDerivation:
             >>> if not is_strong:
             ...     raise ValueError("Key too weak")
         """
-        raise NotImplementedError("Implementation pending")
+        if not isinstance(key, (bytes, bytearray)):
+            return False
+
+        return len(key) == self.DEFAULT_KEY_LENGTH
