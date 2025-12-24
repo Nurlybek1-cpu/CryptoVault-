@@ -34,6 +34,9 @@ from typing import TYPE_CHECKING, Generator
 if TYPE_CHECKING:
     pass
 
+from src.file_encryption.key_derivation import KeyDerivation
+from src.exceptions import KeyDerivationError
+
 
 @dataclass
 class EncryptionConfig:
@@ -173,6 +176,8 @@ class FileEncryptionModule:
         self._logger: logging.Logger = logging.getLogger(
             f"{__name__}.{self.__class__.__name__}"
         )
+        # Key derivation utility
+        self.key_derivation = KeyDerivation()
         self._logger.info(
             "FileEncryptionModule initialized",
             extra={
@@ -528,4 +533,29 @@ class FileEncryptionModule:
             >>> metadata = module.get_file_metadata("file123")
             >>> print(metadata["original_filename"])
         """
-        raise NotImplementedError("Implementation pending")
+        if not password: # type: ignore
+            raise ValueError("password is required for key derivation")
+
+        # Generate salt if not provided
+        if salt is None:
+            salt = self.key_derivation.generate_random_salt(self._config.salt_length)
+
+        # Derive master key using PBKDF2
+        try:
+            master_key = self.key_derivation.pbkdf2_derive(
+                password=password, # type: ignore
+                salt=salt,
+                iterations=self._config.pbkdf2_iterations,
+                dklen=self._config.key_length,
+            )
+        except Exception as exc:
+            self._logger.exception("Failed to derive master key")
+            raise KeyDerivationError("Failed to derive master key") from exc
+
+        # Validate derived key strength
+        if not self.key_derivation.validate_key_strength(master_key):
+            raise KeyDerivationError("Derived key has invalid length or strength")
+
+        self._logger.info(f"Master key derived for user {self._user_id}")
+
+        return master_key, salt
