@@ -331,3 +331,242 @@ class GroupMessagingError(MessagingError):
     """Raised when group messaging operations fail."""
     pass
 # End Module 2
+
+# ============================================================================
+# File Encryption Module Exceptions
+# ============================================================================
+
+class FileEncryptionError(Exception):
+    """
+    Base exception for file encryption operations.
+
+    Raised when file encryption or decryption fails due to algorithm
+    errors, I/O issues, or other cryptographic failures.
+
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        filepath: Optional path to the file that caused the error
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            filepath: str | None = None,
+    ) -> None:
+        """
+        Initialize FileEncryptionError.
+
+        Args:
+            message: Error message describing what went wrong
+            error_code: Optional error code for error categorization
+            filepath: Optional path to the file that caused the error
+        """
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code
+        self.filepath = filepath
+
+
+class KeyDerivationError(FileEncryptionError):
+    """
+    Exception raised when key derivation fails.
+
+    Raised when PBKDF2, Argon2, or other key derivation functions
+    fail due to invalid parameters or system errors.
+
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        algorithm: Key derivation algorithm that failed
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            algorithm: str | None = None,
+    ) -> None:
+        """
+        Initialize KeyDerivationError.
+
+        Args:
+            message: Error message describing the derivation failure
+            error_code: Optional error code for error categorization
+            algorithm: Key derivation algorithm that failed
+        """
+        super().__init__(message, error_code)
+        self.algorithm = algorithm
+
+
+class FileIntegrityError(FileEncryptionError):
+    """
+    Exception raised when file integrity verification fails.
+
+    Raised when hash computation fails or when integrity checks
+    cannot be performed due to I/O or algorithm errors.
+
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        filepath: Path to the file with integrity issues
+        expected_hash: Expected hash value
+        actual_hash: Actual computed hash value
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            filepath: str | None = None,
+            expected_hash: str | None = None,
+            actual_hash: str | None = None,
+    ) -> None:
+        """
+        Initialize FileIntegrityError.
+
+        Args:
+            message: Error message describing the integrity failure
+            error_code: Optional error code for error categorization
+            filepath: Path to the file with integrity issues
+            expected_hash: Expected hash value
+            actual_hash: Actual computed hash value
+        """
+        super().__init__(message, error_code, filepath)
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+
+
+class FileTamperingDetected(FileEncryptionError):
+    """
+    Exception raised when file tampering is detected.
+
+    Raised when authentication tag verification fails or when
+    HMAC verification indicates the file has been modified.
+    This is a security-critical exception.
+
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        filepath: Path to the tampered file
+        detection_method: Method that detected tampering (e.g., "HMAC", "GCM_TAG")
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            filepath: str | None = None,
+            detection_method: str | None = None,
+    ) -> None:
+        """
+        Initialize FileTamperingDetected.
+
+        Args:
+            message: Error message describing the tampering detection
+            error_code: Optional error code for error categorization
+            filepath: Path to the tampered file
+            detection_method: Method that detected tampering
+        """
+        super().__init__(message, error_code, filepath)
+        self.detection_method = detection_method
+
+
+class FileDecodingError(FileEncryptionError):
+    """
+    Exception raised when encrypted file decoding fails.
+
+    Raised when the encrypted file format is invalid or cannot
+    be parsed, such as missing headers or corrupted metadata.
+
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        filepath: Path to the file with decoding issues
+        expected_format: Expected file format
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            filepath: str | None = None,
+            expected_format: str | None = None,
+    ) -> None:
+        """
+        Initialize FileDecodingError.
+
+        Args:
+            message: Error message describing the decoding failure
+            error_code: Optional error code for error categorization
+            filepath: Path to the file with decoding issues
+            expected_format: Expected file format
+        """
+        super().__init__(message, error_code, filepath)
+        self.expected_format = expected_format
+
+
+class MetadataEncryptionError(FileEncryptionError):
+    """
+    Exception raised when metadata encryption/decryption fails.
+
+    Raised when file metadata cannot be encrypted or decrypted,
+    such as header encryption failures or corrupted metadata blocks.
+
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        file_id: File identifier with metadata issues
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            file_id: str | None = None,
+    ) -> None:
+        """
+        Initialize MetadataEncryptionError.
+
+        Args:
+            message: Error message describing the metadata failure
+            error_code: Optional error code for error categorization
+            file_id: File identifier with metadata issues
+        """
+        super().__init__(message, error_code)
+        self.file_id = file_id
+
+
+class FileStreamingError(FileEncryptionError):
+    """
+    Exception raised during streaming file operations.
+
+    Raised when streaming read/write operations fail due to
+    I/O errors, buffer issues, or interrupted operations.
+
+    Attributes:
+        message: Human-readable error message
+        error_code: Optional error code for programmatic handling
+        filepath: Path to the file with streaming issues
+        bytes_processed: Number of bytes processed before failure
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            filepath: str | None = None,
+            bytes_processed: int | None = None,
+    ) -> None:
+        """
+        Initialize FileStreamingError.
+
+        Args:
+            message: Error message describing the streaming failure
+            error_code: Optional error code for error categorization
+            filepath: Path to the file with streaming issues
+            bytes_processed: Number of bytes processed before failure
+        """
+        super().__init__(message, error_code, filepath)
+        self.bytes_processed = bytes_processed
