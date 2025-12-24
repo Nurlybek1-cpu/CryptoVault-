@@ -400,6 +400,23 @@ class KeyDerivationError(FileEncryptionError):
         self.algorithm = algorithm
 
 
+class KeyDecodingError(FileEncryptionError):
+    """
+    Exception raised when key decoding / unwrapping fails.
+
+    Raised when AES key unwrap fails due to wrong master key or corrupted
+    wrapped key data.
+    """
+
+    def __init__(
+            self,
+            message: str,
+            error_code: str | None = None,
+            filepath: str | None = None,
+    ) -> None:
+        super().__init__(message, error_code, filepath)
+
+
 class FileIntegrityError(FileEncryptionError):
     """
     Exception raised when file integrity verification fails.
