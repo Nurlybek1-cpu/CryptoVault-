@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 from src.file_encryption.key_derivation import KeyDerivation
 from src.exceptions import KeyDerivationError
 from src.file_encryption.file_encryptor import FileEncryptor
+from src.file_encryption.key_wrapping import KeyWrapper
+from src.exceptions import KeyDecodingError
 
 
 @dataclass
@@ -181,6 +183,8 @@ class FileEncryptionModule:
         self.key_derivation = KeyDerivation()
         # File encryptor for streaming operations
         self.file_encryptor = FileEncryptor()
+        # Key wrapper (AES-KW) for wrapping FEKs with master key
+        self.key_wrapper = KeyWrapper()
         self._logger.info(
             "FileEncryptionModule initialized",
             extra={
@@ -331,7 +335,32 @@ class FileEncryptionModule:
             >>> key, salt = module.derive_master_key("password123")
             >>> print(f"Key length: {len(key)} bytes")
         """
-        raise NotImplementedError("Implementation pending")
+        if not password:
+            raise ValueError("password is required for key derivation")
+
+        # Generate salt if not provided
+        if salt is None:
+            salt = self.key_derivation.generate_random_salt(self._config.salt_length)
+
+        # Derive master key using PBKDF2
+        try:
+            master_key = self.key_derivation.pbkdf2_derive(
+                password=password,
+                salt=salt,
+                iterations=self._config.pbkdf2_iterations,
+                dklen=self._config.key_length,
+            )
+        except Exception as exc:
+            self._logger.exception("Failed to derive master key")
+            raise KeyDerivationError("Failed to derive master key") from exc
+
+        # Validate derived key strength
+        if not self.key_derivation.validate_key_strength(master_key):
+            raise KeyDerivationError("Derived key has invalid length or strength")
+
+        self._logger.info(f"Master key derived for user {self._user_id}")
+
+        return master_key, salt
 
     def generate_file_encryption_key(self) -> bytes:
         """
@@ -350,7 +379,11 @@ class FileEncryptionModule:
             >>> fek = module.generate_file_encryption_key()
             >>> print(f"FEK length: {len(fek)} bytes")
         """
-        raise NotImplementedError("Implementation pending")
+        try:
+            return os.urandom(self._config.key_length)
+        except Exception as exc:
+            self._logger.exception("Failed to generate FEK")
+            raise
 
     def encrypt_file_encryption_key(
             self,
@@ -377,7 +410,12 @@ class FileEncryptionModule:
         Example:
             >>> encrypted_fek = module.encrypt_file_encryption_key(fek, master_key)
         """
-        raise NotImplementedError("Implementation pending")
+        try:
+            wrapped = self.key_wrapper.encrypt_key_with_master_key(fek, master_key)
+            return wrapped
+        except Exception as exc:
+            self._logger.exception("Failed to wrap FEK")
+            raise
 
     def decrypt_file_encryption_key(
             self,
@@ -404,7 +442,15 @@ class FileEncryptionModule:
         Example:
             >>> fek = module.decrypt_file_encryption_key(encrypted_fek, master_key)
         """
-        raise NotImplementedError("Implementation pending")
+        try:
+            fek = self.key_wrapper.decrypt_key_with_master_key(encrypted_fek, master_key)
+            return fek
+        except KeyDecodingError:
+            # propagate as-is
+            raise
+        except Exception as exc:
+            self._logger.exception("Failed to unwrap FEK")
+            raise
 
     def get_file_integrity_hash(self, filepath: str) -> str:
         """
@@ -536,29 +582,4 @@ class FileEncryptionModule:
             >>> metadata = module.get_file_metadata("file123")
             >>> print(metadata["original_filename"])
         """
-        if not password: # type: ignore
-            raise ValueError("password is required for key derivation")
-
-        # Generate salt if not provided
-        if salt is None:
-            salt = self.key_derivation.generate_random_salt(self._config.salt_length)
-
-        # Derive master key using PBKDF2
-        try:
-            master_key = self.key_derivation.pbkdf2_derive(
-                password=password, # type: ignore
-                salt=salt,
-                iterations=self._config.pbkdf2_iterations,
-                dklen=self._config.key_length,
-            )
-        except Exception as exc:
-            self._logger.exception("Failed to derive master key")
-            raise KeyDerivationError("Failed to derive master key") from exc
-
-        # Validate derived key strength
-        if not self.key_derivation.validate_key_strength(master_key):
-            raise KeyDerivationError("Derived key has invalid length or strength")
-
-        self._logger.info(f"Master key derived for user {self._user_id}")
-
-        return master_key, salt
+        raise NotImplementedError("Implementation pending")
