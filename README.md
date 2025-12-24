@@ -525,12 +525,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and changes.
 
-## Contact
-
-- **Email**: security@cryptovault.dev
-- **Issues**: [GitHub Issues](https://github.com/user/crypto_vault/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/user/crypto_vault/discussions)
-
 ## Acknowledgments
 
 - NIST for cryptographic standards
